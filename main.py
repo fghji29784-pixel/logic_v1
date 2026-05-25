@@ -1,0 +1,1099 @@
+# ─────────────────────────────────────────────
+#  main.py  —  SDM 분석 툴 (PySide6 + Matplotlib)
+#  실행: python main.py
+#  배포: pyinstaller --onefile --windowed main.py
+# ─────────────────────────────────────────────
+
+from __future__ import annotations
+
+import sys
+import os
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+
+from PySide6.QtWidgets import (
+    QApplication, QMainWindow, QTabWidget, QWidget,
+    QVBoxLayout, QHBoxLayout, QGridLayout,
+    QPushButton, QLabel, QFileDialog, QListWidget,
+    QListWidgetItem, QComboBox, QSpinBox, QDoubleSpinBox,
+    QCheckBox, QRadioButton, QButtonGroup, QGroupBox,
+    QTableWidget, QTableWidgetItem, QSplitter,
+    QMessageBox, QProgressDialog, QSlider, QLineEdit,
+    QHeaderView, QAbstractItemView, QFrame, QScrollArea,
+)
+from PySide6.QtCore import Qt, QThread, Signal, QTimer
+from PySide6.QtGui import QFont, QColor
+
+import matplotlib
+matplotlib.use('QtAgg')
+from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
+from matplotlib.figure import Figure
+import matplotlib.pyplot as plt
+import matplotlib.colors as mcolors
+import seaborn as sns
+
+from parser   import parse_multiple_trays, get_layer
+from analysis import (
+    add_layer_dummies, run_analysis,
+    separation_curve, confusion_at_threshold, compute_metrics,
+)
+from constants import (
+    TOTAL_CELLS, TRAY_ROWS, TRAY_COLS, NUM_LAYERS,
+    PROCESS_COL_GRADE, PROCESS_COL_DOCV,
+    REF_V_INIT, REF_T_FINAL,
+)
+
+# ── matplotlib 한글 폰트 ──────────────────────
+plt.rcParams['font.family'] = 'Malgun Gothic'
+plt.rcParams['axes.unicode_minus'] = False
+
+
+# ══════════════════════════════════════════════
+#  공유 상태 (AppState)
+# ══════════════════════════════════════════════
+
+class AppState:
+    def __init__(self):
+        self.df_meta: pd.DataFrame     = pd.DataFrame()
+        self.df_ts:   pd.DataFrame     = pd.DataFrame()
+        self.n_minutes: int            = 15
+        self.analysis_results: dict    = {}   # option → result dict
+        self.selected_option: int      = 1
+        self.dep_type: str             = 'single'
+        self.threshold: float          = 2.0
+        self.rwiring_threshold: float | None = None
+        self.callbacks: list           = []   # 데이터 갱신 시 호출
+
+    def notify(self):
+        for cb in self.callbacks:
+            try:
+                cb()
+            except Exception as e:
+                print(f'[콜백 오류] {e}')
+
+
+# ══════════════════════════════════════════════
+#  분석 백그라운드 스레드
+# ══════════════════════════════════════════════
+
+class AnalysisWorker(QThread):
+    finished = Signal(dict)
+    error    = Signal(str)
+
+    def __init__(self, state: AppState, option: int):
+        super().__init__()
+        self.state  = state
+        self.option = option
+
+    def run(self):
+        try:
+            res = run_analysis(
+                self.state.df_meta,
+                option=self.option,
+                n_minutes=self.state.n_minutes,
+                dep_type=self.state.dep_type,
+                rwiring_threshold=self.state.rwiring_threshold,
+            )
+            self.finished.emit(res)
+        except Exception as e:
+            self.error.emit(str(e))
+
+
+# ══════════════════════════════════════════════
+#  공통 Matplotlib 캔버스 위젯
+# ══════════════════════════════════════════════
+
+class PlotCanvas(FigureCanvas):
+    def __init__(self, parent=None, figsize=(6, 4)):
+        self.fig = Figure(figsize=figsize, tight_layout=True)
+        super().__init__(self.fig)
+        self.setParent(parent)
+
+    def clear(self):
+        self.fig.clear()
+        self.draw()
+
+
+# ══════════════════════════════════════════════
+#  Tab 1: 데이터 불러오기
+# ══════════════════════════════════════════════
+
+class Tab1Load(QWidget):
+    data_loaded = Signal()
+
+    def __init__(self, state: AppState):
+        super().__init__()
+        self.state = state
+        self._build_ui()
+
+    def _build_ui(self):
+        layout = QVBoxLayout(self)
+
+        # ── 상위 폴더 선택 ──
+        g_folder = QGroupBox('① SDM 데이터 폴더 선택')
+        fl = QVBoxLayout(g_folder)
+
+        h1 = QHBoxLayout()
+        self.btn_folder = QPushButton('상위 폴더 선택…')
+        self.lbl_folder = QLabel('(선택 없음)')
+        self.lbl_folder.setWordWrap(True)
+        h1.addWidget(self.btn_folder)
+        h1.addWidget(self.lbl_folder, 1)
+        fl.addLayout(h1)
+
+        fl.addWidget(QLabel('트레이 목록 (최대 4개 선택):'))
+        self.lst_trays = QListWidget()
+        self.lst_trays.setSelectionMode(QAbstractItemView.MultiSelection)
+        fl.addWidget(self.lst_trays)
+        layout.addWidget(g_folder)
+
+        # ── 공정 데이터 ──
+        g_proc = QGroupBox('② 공정 데이터 파일 선택 (dOCV 파일)')
+        pl = QHBoxLayout(g_proc)
+        self.btn_proc = QPushButton('파일 선택…')
+        self.lbl_proc = QLabel('(선택 없음)')
+        self.lbl_proc.setWordWrap(True)
+        pl.addWidget(self.btn_proc)
+        pl.addWidget(self.lbl_proc, 1)
+        layout.addWidget(g_proc)
+
+        # ── 측정 시간 N ──
+        g_n = QGroupBox('③ 측정 시간 N (분)')
+        nl = QHBoxLayout(g_n)
+        self.spin_n = QSpinBox()
+        self.spin_n.setRange(5, 30)
+        self.spin_n.setValue(15)
+        nl.addWidget(self.spin_n)
+        nl.addStretch()
+        layout.addWidget(g_n)
+
+        # ── 불러오기 버튼 ──
+        self.btn_load = QPushButton('▶  데이터 불러오기')
+        self.btn_load.setFixedHeight(40)
+        font = self.btn_load.font()
+        font.setBold(True)
+        self.btn_load.setFont(font)
+        layout.addWidget(self.btn_load)
+
+        # ── 미리보기 테이블 ──
+        layout.addWidget(QLabel('미리보기 (df_meta 상위 50행):'))
+        self.preview_table = QTableWidget()
+        self.preview_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        layout.addWidget(self.preview_table)
+
+        # 시그널
+        self.btn_folder.clicked.connect(self._select_folder)
+        self.btn_proc.clicked.connect(self._select_proc)
+        self.btn_load.clicked.connect(self._load_data)
+
+        self._folder_path   = None
+        self._proc_filepath = None
+
+    def _select_folder(self):
+        path = QFileDialog.getExistingDirectory(self, '상위 폴더 선택')
+        if path:
+            self._folder_path = path
+            self.lbl_folder.setText(path)
+            self._scan_trays(path)
+
+    def _scan_trays(self, root: str):
+        self.lst_trays.clear()
+        p = Path(root)
+        subdirs = [d for d in sorted(p.iterdir()) if d.is_dir()]
+        for d in subdirs:
+            has_kss  = any(d.glob('*.kss')) or any(d.glob('*.KSS'))
+            has_temp = any(d.glob('*TEMP_DATA*'))
+            if has_kss:
+                item = QListWidgetItem(f'{d.name}{"  [온도O]" if has_temp else "  [온도X]"}')
+                item.setData(Qt.UserRole, str(d))
+                self.lst_trays.addItem(item)
+
+    def _select_proc(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, '공정 데이터 파일 선택', '',
+            'Excel/CSV (*.xlsx *.xls *.csv);;모든 파일 (*)'
+        )
+        if path:
+            self._proc_filepath = path
+            self.lbl_proc.setText(Path(path).name)
+
+    def _load_data(self):
+        selected = self.lst_trays.selectedItems()
+        if not selected:
+            QMessageBox.warning(self, '경고', '트레이를 1개 이상 선택하세요.')
+            return
+        if len(selected) > 4:
+            QMessageBox.warning(self, '경고', '최대 4개 트레이까지 선택 가능합니다.')
+            return
+
+        folder_paths = [item.data(Qt.UserRole) for item in selected]
+        n = self.spin_n.value()
+
+        dlg = QProgressDialog('데이터 불러오는 중…', None, 0, 0, self)
+        dlg.setWindowModality(Qt.WindowModal)
+        dlg.show()
+        QApplication.processEvents()
+
+        try:
+            df_meta, df_ts = parse_multiple_trays(
+                folder_paths,
+                process_filepath=self._proc_filepath,
+                n_minutes=n,
+            )
+            self.state.df_meta   = df_meta
+            self.state.df_ts     = df_ts
+            self.state.n_minutes = n
+            self.state.analysis_results = {}
+            self._show_preview(df_meta)
+            self.state.notify()
+            self.data_loaded.emit()
+            dlg.close()
+            QMessageBox.information(self, '완료',
+                f'셀 {len(df_meta)}개 불러오기 완료.\n'
+                f'시계열 행 수: {len(df_ts):,}')
+        except Exception as e:
+            dlg.close()
+            QMessageBox.critical(self, '오류', str(e))
+
+    def _show_preview(self, df: pd.DataFrame):
+        sub = df.head(50)
+        self.preview_table.setRowCount(len(sub))
+        self.preview_table.setColumnCount(len(sub.columns))
+        self.preview_table.setHorizontalHeaderLabels(list(sub.columns))
+        for r, row in enumerate(sub.itertuples(index=False)):
+            for c, val in enumerate(row):
+                self.preview_table.setItem(r, c, QTableWidgetItem(str(val)))
+        self.preview_table.resizeColumnsToContents()
+
+
+# ══════════════════════════════════════════════
+#  Tab 2: 원시 데이터 탐색
+# ══════════════════════════════════════════════
+
+class Tab2Explore(QWidget):
+    def __init__(self, state: AppState):
+        super().__init__()
+        self.state = state
+        self._build_ui()
+        state.callbacks.append(self._refresh)
+
+    def _build_ui(self):
+        layout = QHBoxLayout(self)
+
+        # 왼쪽 컨트롤
+        ctrl = QWidget()
+        ctrl.setFixedWidth(200)
+        cl = QVBoxLayout(ctrl)
+
+        cl.addWidget(QLabel('트레이:'))
+        self.cb_tray = QComboBox()
+        cl.addWidget(self.cb_tray)
+
+        cl.addWidget(QLabel('셀 번호:'))
+        self.cb_cell = QComboBox()
+        cl.addWidget(self.cb_cell)
+
+        self.btn_plot = QPushButton('그래프 그리기')
+        cl.addWidget(self.btn_plot)
+
+        cl.addWidget(QLabel('── 전체 오버레이 ──'))
+        self.btn_overlay = QPushButton('전류 오버레이')
+        cl.addWidget(self.btn_overlay)
+
+        cl.addStretch()
+        layout.addWidget(ctrl)
+
+        # 오른쪽 캔버스 (3개 서브플롯)
+        self.canvas = PlotCanvas(figsize=(10, 7))
+        layout.addWidget(self.canvas)
+
+        self.cb_tray.currentTextChanged.connect(self._update_cells)
+        self.btn_plot.clicked.connect(self._plot_cell)
+        self.btn_overlay.clicked.connect(self._plot_overlay)
+
+    def _refresh(self):
+        self.cb_tray.clear()
+        if self.state.df_ts.empty:
+            return
+        trays = self.state.df_ts['tray_id'].unique().tolist()
+        self.cb_tray.addItems(trays)
+
+    def _update_cells(self, tray):
+        self.cb_cell.clear()
+        if self.state.df_ts.empty or not tray:
+            return
+        cells = sorted(self.state.df_ts[self.state.df_ts['tray_id'] == tray]['cell_no'].unique())
+        self.cb_cell.addItems([str(c) for c in cells])
+
+    def _plot_cell(self):
+        tray = self.cb_tray.currentText()
+        cell_text = self.cb_cell.currentText()
+        if not tray or not cell_text:
+            return
+        cell = int(cell_text)
+        sub = self.state.df_ts[
+            (self.state.df_ts['tray_id'] == tray) &
+            (self.state.df_ts['cell_no']  == cell)
+        ]
+        if sub.empty:
+            return
+
+        self.canvas.fig.clear()
+        ax1, ax2, ax3 = self.canvas.fig.subplots(3, 1, sharex=True)
+
+        t = sub['t_sec'].values / 60  # 초→분
+        ax1.plot(t, sub['current_A'].values * 1e6)
+        ax1.set_ylabel('전류 (µA)')
+        ax1.set_title(f'Tray: {tray}  Cell: {cell}')
+        ax1.grid(True, alpha=0.3)
+
+        ax2.plot(t, sub['voltage_V'].values * 1000, color='orange')
+        ax2.set_ylabel('전압 (mV)')
+        ax2.grid(True, alpha=0.3)
+
+        ax3.plot(t, sub['temp_C'].values, color='red')
+        ax3.set_ylabel('온도 (°C)')
+        ax3.set_xlabel('시간 (분)')
+        ax3.grid(True, alpha=0.3)
+
+        self.canvas.fig.tight_layout()
+        self.canvas.draw()
+
+    def _plot_overlay(self):
+        tray = self.cb_tray.currentText()
+        if not tray or self.state.df_ts.empty:
+            return
+        sub = self.state.df_ts[self.state.df_ts['tray_id'] == tray]
+
+        self.canvas.fig.clear()
+        ax = self.canvas.fig.add_subplot(111)
+
+        for cell, grp in sub.groupby('cell_no'):
+            t = grp['t_sec'].values / 60
+            i = grp['current_A'].values * 1e6
+            ax.plot(t, i, alpha=0.4, linewidth=0.8)
+
+        ax.set_xlabel('시간 (분)')
+        ax.set_ylabel('전류 (µA)')
+        ax.set_title(f'{tray} — 전체 셀 전류 오버레이')
+        ax.grid(True, alpha=0.3)
+        self.canvas.fig.tight_layout()
+        self.canvas.draw()
+
+
+# ══════════════════════════════════════════════
+#  Tab 3: 히트맵
+# ══════════════════════════════════════════════
+
+class Tab3Heatmap(QWidget):
+    def __init__(self, state: AppState):
+        super().__init__()
+        self.state = state
+        self._build_ui()
+        state.callbacks.append(self._refresh)
+
+    def _build_ui(self):
+        layout = QVBoxLayout(self)
+
+        ctrl = QHBoxLayout()
+        ctrl.addWidget(QLabel('트레이:'))
+        self.cb_tray = QComboBox()
+        ctrl.addWidget(self.cb_tray)
+
+        ctrl.addWidget(QLabel('히트맵 종류:'))
+        self.cb_type = QComboBox()
+        self.cb_type.addItems([
+            f'SDM 전류 (i_{15}min)', '온도 (T_final)',
+            'Rwiring', 'dOCV (#07)', '판정등급',
+        ])
+        ctrl.addWidget(self.cb_type)
+
+        self.btn_draw = QPushButton('그리기')
+        ctrl.addWidget(self.btn_draw)
+        ctrl.addStretch()
+        layout.addLayout(ctrl)
+
+        self.canvas = PlotCanvas(figsize=(8, 7))
+        layout.addWidget(self.canvas)
+
+        self.cb_tray.currentTextChanged.connect(lambda _: None)
+        self.btn_draw.clicked.connect(self._draw)
+
+    def _refresh(self):
+        self.cb_tray.clear()
+        if self.state.df_meta.empty:
+            return
+        trays = self.state.df_meta['tray_id'].unique().tolist()
+        self.cb_tray.addItems(trays)
+        # cb_type의 SDM 전류 항목 이름 업데이트
+        n = self.state.n_minutes
+        self.cb_type.setItemText(0, f'SDM 전류 (i_{n}min)')
+
+    def _get_grid(self, tray: str, col: str) -> np.ndarray:
+        """셀 번호 → 12×12 그리드 변환"""
+        sub = self.state.df_meta[self.state.df_meta['tray_id'] == tray]
+        grid = np.full((TRAY_ROWS, TRAY_COLS), np.nan)
+        if col not in sub.columns:
+            return grid
+        for _, row in sub.iterrows():
+            cn = int(row['cell_no']) - 1
+            r  = cn // TRAY_COLS
+            c  = cn %  TRAY_COLS
+            try:
+                grid[r, c] = float(row[col])
+            except (ValueError, TypeError):
+                pass
+        return grid
+
+    def _draw(self):
+        tray = self.cb_tray.currentText()
+        kind = self.cb_type.currentIndex()
+        if not tray or self.state.df_meta.empty:
+            return
+
+        n   = self.state.n_minutes
+        col_map = {
+            0: (f'i_{n}min', 'SDM 전류 (µA)', lambda v: v * 1e6),
+            1: ('t_final',   '온도 (°C)',       lambda v: v),
+            2: ('rwiring',   'Rwiring (Ω)',      lambda v: v),
+            3: (PROCESS_COL_DOCV, 'dOCV #07',   lambda v: v),
+            4: (PROCESS_COL_GRADE, '판정등급',   None),
+        }
+        col, title, transform = col_map[kind]
+
+        self.canvas.fig.clear()
+        ax = self.canvas.fig.add_subplot(111)
+
+        if kind == 4:
+            # 판정등급: A=0, E=1
+            sub = self.state.df_meta[self.state.df_meta['tray_id'] == tray]
+            grid = np.full((TRAY_ROWS, TRAY_COLS), np.nan)
+            for _, row in sub.iterrows():
+                cn = int(row['cell_no']) - 1
+                r  = cn // TRAY_COLS
+                c  = cn %  TRAY_COLS
+                grade = str(row.get(PROCESS_COL_GRADE, '')).upper()
+                grid[r, c] = 1.0 if grade == 'E' else 0.0
+            cmap = mcolors.ListedColormap(['black', 'red'])
+            im = ax.imshow(grid, cmap=cmap, vmin=0, vmax=1, aspect='equal')
+            ax.set_title(f'{tray} — 판정등급 (검=A, 빨=E)')
+        else:
+            grid = self._get_grid(tray, col)
+            if transform:
+                grid = transform(grid)
+            im = ax.imshow(grid, cmap='RdYlGn_r', aspect='equal')
+            self.canvas.fig.colorbar(im, ax=ax)
+            ax.set_title(f'{tray} — {title}')
+
+        ax.set_xticks(range(TRAY_COLS))
+        ax.set_yticks(range(TRAY_ROWS))
+        ax.set_xticklabels(range(1, TRAY_COLS + 1), fontsize=7)
+        ax.set_yticklabels(range(1, TRAY_ROWS + 1), fontsize=7)
+        self.canvas.fig.tight_layout()
+        self.canvas.draw()
+
+
+# ══════════════════════════════════════════════
+#  Tab 4: 분석 로직
+# ══════════════════════════════════════════════
+
+class Tab4Analysis(QWidget):
+    analysis_done = Signal(int)  # option
+
+    def __init__(self, state: AppState):
+        super().__init__()
+        self.state   = state
+        self.workers: dict[int, AnalysisWorker] = {}
+        self._build_ui()
+        state.callbacks.append(self._refresh)
+
+    def _build_ui(self):
+        layout = QHBoxLayout(self)
+
+        # ── 왼쪽: 설정 패널 ──
+        ctrl = QWidget()
+        ctrl.setFixedWidth(260)
+        cl = QVBoxLayout(ctrl)
+
+        # 옵션 선택
+        g_opt = QGroupBox('모델 옵션')
+        ol = QVBoxLayout(g_opt)
+        self.opt_group = QButtonGroup(self)
+        labels = [
+            ('옵션 1: OLS (SDM만)',            1),
+            ('옵션 2: OLS (SDM+공정)',          2),
+            ('옵션 3: Robust (SDM만)',          3),
+            ('옵션 4: Robust (SDM+공정)',       4),
+            ('옵션 5: Lasso + LOO-tray CV',    5),
+        ]
+        for txt, val in labels:
+            rb = QRadioButton(txt)
+            if val == 1:
+                rb.setChecked(True)
+            self.opt_group.addButton(rb, val)
+            ol.addWidget(rb)
+        cl.addWidget(g_opt)
+
+        # 종속변수
+        g_dep = QGroupBox('종속변수')
+        dl = QVBoxLayout(g_dep)
+        self.rb_single = QRadioButton('단일값 (v1)')
+        self.rb_slope  = QRadioButton('기울기 slope (v2)')
+        self.rb_single.setChecked(True)
+        dl.addWidget(self.rb_single)
+        dl.addWidget(self.rb_slope)
+        cl.addWidget(g_dep)
+
+        # Rwiring 임계값
+        g_rw = QGroupBox('Rwiring 임계값 (0 = 미적용)')
+        rl = QHBoxLayout(g_rw)
+        self.spin_rw = QDoubleSpinBox()
+        self.spin_rw.setRange(0, 100)
+        self.spin_rw.setValue(0)
+        self.spin_rw.setSuffix(' Ω')
+        rl.addWidget(self.spin_rw)
+        cl.addWidget(g_rw)
+
+        # 실행 버튼
+        self.btn_run_one = QPushButton('▶  현재 옵션 실행')
+        self.btn_run_all = QPushButton('▶▶  옵션 1~5 전부 실행')
+        self.btn_run_one.setFixedHeight(36)
+        self.btn_run_all.setFixedHeight(36)
+        cl.addWidget(self.btn_run_one)
+        cl.addWidget(self.btn_run_all)
+
+        cl.addStretch()
+        layout.addWidget(ctrl)
+
+        # ── 오른쪽: 결과 출력 ──
+        right = QWidget()
+        rl2 = QVBoxLayout(right)
+
+        # 회귀계수 테이블
+        rl2.addWidget(QLabel('회귀계수 및 VIF:'))
+        self.tbl_coef = QTableWidget(0, 4)
+        self.tbl_coef.setHorizontalHeaderLabels(['변수', '계수', 'p-value', 'VIF'])
+        self.tbl_coef.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.tbl_coef.setFixedHeight(200)
+        rl2.addWidget(self.tbl_coef)
+
+        # R² 라벨
+        self.lbl_r2 = QLabel('R² : —   Adj.R² : —')
+        rl2.addWidget(self.lbl_r2)
+
+        # 옵션별 분리도 비교
+        rl2.addWidget(QLabel('옵션별 분리도 비교:'))
+        self.tbl_sep = QTableWidget(5, 3)
+        self.tbl_sep.setHorizontalHeaderLabels(['옵션', 'd_prime', 'AUC'])
+        self.tbl_sep.setFixedHeight(140)
+        for i in range(5):
+            self.tbl_sep.setItem(i, 0, QTableWidgetItem(f'옵션 {i+1}'))
+        rl2.addWidget(self.tbl_sep)
+
+        # 잔차/보정 분포 그래프
+        self.canvas = PlotCanvas(figsize=(8, 3))
+        rl2.addWidget(self.canvas)
+
+        layout.addWidget(right)
+
+        # 시그널
+        self.btn_run_one.clicked.connect(self._run_one)
+        self.btn_run_all.clicked.connect(self._run_all)
+
+    def _refresh(self):
+        self.tbl_coef.setRowCount(0)
+        self.lbl_r2.setText('R² : —   Adj.R² : —')
+
+    def _get_settings(self):
+        opt      = self.opt_group.checkedId()
+        dep_type = 'slope' if self.rb_slope.isChecked() else 'single'
+        rw       = self.spin_rw.value() or None
+        return opt, dep_type, rw
+
+    def _run_one(self):
+        if self.state.df_meta.empty:
+            QMessageBox.warning(self, '경고', '먼저 데이터를 불러오세요.')
+            return
+        opt, dep_type, rw = self._get_settings()
+        self.state.dep_type           = dep_type
+        self.state.rwiring_threshold  = rw
+        self._launch_worker(opt)
+
+    def _run_all(self):
+        if self.state.df_meta.empty:
+            QMessageBox.warning(self, '경고', '먼저 데이터를 불러오세요.')
+            return
+        _, dep_type, rw = self._get_settings()
+        self.state.dep_type          = dep_type
+        self.state.rwiring_threshold = rw
+        for opt in range(1, 6):
+            self._launch_worker(opt)
+
+    def _launch_worker(self, opt: int):
+        w = AnalysisWorker(self.state, opt)
+        self.workers[opt] = w
+        w.finished.connect(lambda res, o=opt: self._on_done(o, res))
+        w.error.connect(lambda e, o=opt:
+                        QMessageBox.critical(self, f'옵션 {o} 오류', e))
+        w.start()
+
+    def _on_done(self, opt: int, res: dict):
+        self.state.analysis_results[opt] = res
+        self.analysis_done.emit(opt)
+
+        # 현재 선택 옵션이면 화면 업데이트
+        if opt == self.opt_group.checkedId():
+            self._display(res)
+
+        # 분리도 비교표 업데이트
+        m = res.get('metrics', {})
+        self.tbl_sep.setItem(opt - 1, 1,
+            QTableWidgetItem(f"{m.get('d_prime', '—'):.3f}"
+                             if isinstance(m.get('d_prime'), float) else '—'))
+        self.tbl_sep.setItem(opt - 1, 2,
+            QTableWidgetItem(f"{m.get('auc', '—'):.3f}"
+                             if isinstance(m.get('auc'), float) else '—'))
+
+    def _display(self, res: dict):
+        model = res.get('model')
+        vif   = res.get('vif')
+
+        # 회귀계수 테이블
+        self.tbl_coef.setRowCount(0)
+        if model is not None and hasattr(model, 'params'):
+            params = model.params.drop('const', errors='ignore')
+            pvals  = model.pvalues.drop('const', errors='ignore')
+            vif_map = {}
+            if vif is not None and isinstance(vif, pd.DataFrame):
+                vif_map = dict(zip(vif['feature'], vif['VIF']))
+
+            for feat in params.index:
+                r = self.tbl_coef.rowCount()
+                self.tbl_coef.insertRow(r)
+                self.tbl_coef.setItem(r, 0, QTableWidgetItem(feat))
+                self.tbl_coef.setItem(r, 1, QTableWidgetItem(f'{params[feat]:.4f}'))
+                self.tbl_coef.setItem(r, 2, QTableWidgetItem(f'{pvals.get(feat, float("nan")):.4f}'))
+                vif_val = vif_map.get(feat, float('nan'))
+                item_vif = QTableWidgetItem(f'{vif_val:.1f}')
+                if vif_val > 10:
+                    item_vif.setBackground(QColor(255, 200, 200))
+                self.tbl_coef.setItem(r, 3, item_vif)
+
+            r2  = getattr(model, 'rsquared', float('nan'))
+            ar2 = getattr(model, 'rsquared_adj', float('nan'))
+            self.lbl_r2.setText(f'R² : {r2:.4f}   Adj.R² : {ar2:.4f}')
+
+        # 보정값 분포
+        corrected = res.get('corrected')
+        if corrected is not None:
+            self.canvas.fig.clear()
+            ax = self.canvas.fig.add_subplot(111)
+            ax.hist(corrected.dropna(), bins=40, edgecolor='white', alpha=0.7)
+            ax.set_xlabel('보정값 (µA)')
+            ax.set_ylabel('빈도')
+            ax.set_title(f'옵션 {res["option"]} 보정값 분포')
+            ax.grid(True, alpha=0.3)
+            self.canvas.fig.tight_layout()
+            self.canvas.draw()
+
+
+# ══════════════════════════════════════════════
+#  Tab 5: 결과 및 판정
+# ══════════════════════════════════════════════
+
+class Tab5Result(QWidget):
+    def __init__(self, state: AppState):
+        super().__init__()
+        self.state = state
+        self._build_ui()
+        state.callbacks.append(self._refresh)
+
+    def _build_ui(self):
+        layout = QHBoxLayout(self)
+
+        # ── 왼쪽 설정 ──
+        ctrl = QWidget()
+        ctrl.setFixedWidth(220)
+        cl = QVBoxLayout(ctrl)
+
+        cl.addWidget(QLabel('옵션 선택:'))
+        self.cb_opt = QComboBox()
+        self.cb_opt.addItems([f'옵션 {i}' for i in range(1, 6)])
+        cl.addWidget(self.cb_opt)
+
+        cl.addWidget(QLabel('기준선 (z-score):'))
+        self.spin_thresh = QDoubleSpinBox()
+        self.spin_thresh.setRange(-10, 20)
+        self.spin_thresh.setValue(2.0)
+        self.spin_thresh.setSingleStep(0.1)
+        cl.addWidget(self.spin_thresh)
+
+        self.btn_draw = QPushButton('그래프 갱신')
+        cl.addWidget(self.btn_draw)
+
+        # TP/FP/FN/TN
+        g_cm = QGroupBox('혼동행렬')
+        gml  = QGridLayout(g_cm)
+        self.lbl_tp = QLabel('TP: —')
+        self.lbl_fp = QLabel('FP: —')
+        self.lbl_fn = QLabel('FN: —')
+        self.lbl_tn = QLabel('TN: —')
+        gml.addWidget(self.lbl_tp, 0, 0)
+        gml.addWidget(self.lbl_fp, 0, 1)
+        gml.addWidget(self.lbl_fn, 1, 0)
+        gml.addWidget(self.lbl_tn, 1, 1)
+        cl.addWidget(g_cm)
+
+        # d_prime / AUC
+        self.lbl_dp  = QLabel("d' : —")
+        self.lbl_auc = QLabel('AUC: —')
+        cl.addWidget(self.lbl_dp)
+        cl.addWidget(self.lbl_auc)
+
+        cl.addStretch()
+        layout.addWidget(ctrl)
+
+        # ── 오른쪽 캔버스 (2×2) ──
+        self.canvas = PlotCanvas(figsize=(10, 8))
+        layout.addWidget(self.canvas)
+
+        self.cb_opt.currentIndexChanged.connect(self._draw)
+        # spin_thresh → state.threshold 동기화 + 그래프 갱신
+        self.spin_thresh.valueChanged.connect(
+            lambda v: (setattr(self.state, 'threshold', v), self._draw())
+        )
+        self.btn_draw.clicked.connect(self._draw)
+
+    def _refresh(self):
+        pass  # 분석 완료 후 Tab4에서 analysis_done 시그널로 연결
+
+    def _draw(self):
+        opt = self.cb_opt.currentIndex() + 1
+        res = self.state.analysis_results.get(opt)
+        if res is None:
+            return
+
+        z_scores  = res.get('z_scores')
+        corrected = res.get('corrected')
+        df_valid  = res.get('df_valid', pd.DataFrame())
+        threshold = self.spin_thresh.value()
+
+        grade_col   = PROCESS_COL_GRADE
+        true_labels = df_valid[grade_col] if grade_col in df_valid.columns else None
+        docv_col    = PROCESS_COL_DOCV
+        docv_vals   = df_valid[docv_col].apply(pd.to_numeric, errors='coerce') \
+                      if docv_col in df_valid.columns else None
+
+        self.canvas.fig.clear()
+        axes = self.canvas.fig.subplots(2, 2)
+
+        # ── (0,0) z-score 분포 ──
+        ax = axes[0, 0]
+        if z_scores is not None:
+            # astype(str) 먼저 — NaN이 섞인 Series에서 .str.upper() 단독 사용 시 오류
+            grade_str = true_labels.astype(str).str.upper() if true_labels is not None else None
+            good_z = z_scores[grade_str == 'A'] if grade_str is not None else z_scores
+            bad_z  = z_scores[grade_str == 'E'] if grade_str is not None else pd.Series(dtype=float)
+            ax.hist(good_z.dropna(), bins=30, color='black', alpha=0.6, label='양품(A)')
+            if not bad_z.empty:
+                ax.hist(bad_z.dropna(), bins=30, color='red', alpha=0.7, label='불량(E)')
+            ax.axvline(threshold, color='blue', linestyle='--', label=f'기준선 {threshold}')
+            ax.set_xlabel('z-score')
+            ax.set_ylabel('빈도')
+            ax.set_title('보정값 z-score 분포')
+            ax.legend(fontsize=8)
+            ax.grid(True, alpha=0.3)
+
+        # ── (0,1) dOCV vs 보정값 산점도 ──
+        ax = axes[0, 1]
+        if corrected is not None and docv_vals is not None:
+            ax.scatter(docv_vals, corrected, alpha=0.4, s=10, color='steelblue')
+            ax.set_xlabel('dOCV #07')
+            ax.set_ylabel('SDM 보정값 (µA)')
+            ax.set_title('dOCV vs SDM 보정값')
+            ax.grid(True, alpha=0.3)
+
+        # ── (1,0) 분리도 N분 커브 ──
+        ax = axes[1, 0]
+        try:
+            curve_df = separation_curve(
+                self.state.df_meta, option=opt,
+                dep_type=self.state.dep_type,
+                n_range=range(5, 16),
+                rwiring_threshold=self.state.rwiring_threshold,
+            )
+            ax.plot(curve_df['n_minutes'], curve_df['d_prime'], marker='o')
+            ax.axhline(2.0, color='red', linestyle='--', alpha=0.5, label="d'=2")
+            ax.set_xlabel('N (분)')
+            ax.set_ylabel("d'")
+            ax.set_title('분리도 vs 측정 시간')
+            ax.legend(fontsize=8)
+            ax.grid(True, alpha=0.3)
+        except Exception:
+            ax.set_title('분리도 커브 계산 실패')
+
+        # ── (1,1) 옵션별 분리도 막대 ──
+        ax = axes[1, 1]
+        opts = []
+        dps  = []
+        for o in range(1, 6):
+            r = self.state.analysis_results.get(o)
+            if r:
+                dp = r.get('metrics', {}).get('d_prime', np.nan)
+                opts.append(f'옵{o}')
+                dps.append(dp if isinstance(dp, float) else np.nan)
+        if opts:
+            colors = ['steelblue'] * len(opts)
+            colors[opt - 1] = 'orange'
+            ax.bar(opts, dps, color=colors)
+            ax.set_ylabel("d'")
+            ax.set_title('옵션별 분리도 비교')
+            ax.grid(True, alpha=0.3, axis='y')
+
+        self.canvas.fig.tight_layout()
+        self.canvas.draw()
+
+        # 혼동행렬 업데이트
+        if z_scores is not None and true_labels is not None:
+            cm = confusion_at_threshold(z_scores, true_labels, threshold)
+            self.lbl_tp.setText(f'TP: {cm["TP"]}')
+            self.lbl_fp.setText(f'FP: {cm["FP"]}')
+            self.lbl_fn.setText(f'FN: {cm["FN"]}')
+            self.lbl_tn.setText(f'TN: {cm["TN"]}')
+
+        m = res.get('metrics', {})
+        self.lbl_dp.setText(f"d' : {m.get('d_prime', '—'):.3f}"
+                            if isinstance(m.get('d_prime'), float) else "d' : —")
+        self.lbl_auc.setText(f"AUC: {m.get('auc', '—'):.3f}"
+                             if isinstance(m.get('auc'), float) else 'AUC: —')
+
+
+# ══════════════════════════════════════════════
+#  Tab 6: 통합 결과 테이블
+# ══════════════════════════════════════════════
+
+class Tab6Table(QWidget):
+    def __init__(self, state: AppState):
+        super().__init__()
+        self.state = state
+        self._build_ui()
+        state.callbacks.append(self._refresh)
+
+    def _build_ui(self):
+        layout = QVBoxLayout(self)
+
+        ctrl = QHBoxLayout()
+        ctrl.addWidget(QLabel('옵션:'))
+        self.cb_opt = QComboBox()
+        self.cb_opt.addItems([f'옵션 {i}' for i in range(1, 6)])
+        ctrl.addWidget(self.cb_opt)
+
+        ctrl.addWidget(QLabel('등급 필터:'))
+        self.cb_grade = QComboBox()
+        self.cb_grade.addItems(['전체', 'A만', 'E만'])
+        ctrl.addWidget(self.cb_grade)
+
+        self.btn_build = QPushButton('테이블 생성')
+        ctrl.addWidget(self.btn_build)
+        ctrl.addStretch()
+        layout.addLayout(ctrl)
+
+        self.table = QTableWidget()
+        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
+        layout.addWidget(self.table)
+
+        self.btn_build.clicked.connect(self._build_table)
+
+    def _refresh(self):
+        pass
+
+    def _build_table(self):
+        opt = self.cb_opt.currentIndex() + 1
+        res = self.state.analysis_results.get(opt)
+        if res is None:
+            QMessageBox.information(self, '알림', f'옵션 {opt} 분석을 먼저 실행하세요.')
+            return
+
+        df_valid  = res.get('df_valid', pd.DataFrame()).copy()
+        corrected = res.get('corrected')
+        z_scores  = res.get('z_scores')
+
+        if corrected is not None:
+            df_valid['보정값(µA)'] = corrected
+        if z_scores is not None:
+            df_valid['z_score']   = z_scores
+
+        # 등급 필터
+        grade_col = PROCESS_COL_GRADE
+        filt = self.cb_grade.currentText()
+        if filt == 'A만' and grade_col in df_valid.columns:
+            df_valid = df_valid[df_valid[grade_col].astype(str).str.upper() == 'A']
+        elif filt == 'E만' and grade_col in df_valid.columns:
+            df_valid = df_valid[df_valid[grade_col].astype(str).str.upper() == 'E']
+
+        # 표시 컬럼 순서 정리
+        priority = [
+            'tray_id', 'cell_no', 'layer', 'v_init', 't_final', 'delta_t',
+            'rwiring', 'OCV1', 'OCV2', 'OCV3', 'OCV4', 'OCV7',
+            f'i_{self.state.n_minutes}min', '보정값(µA)', 'z_score',
+            PROCESS_COL_GRADE, 'Cell ID', 'Lot ID',
+        ]
+        cols = [c for c in priority if c in df_valid.columns]
+        rest = [c for c in df_valid.columns if c not in cols]
+        df_show = df_valid[cols + rest]
+
+        self.table.setRowCount(len(df_show))
+        self.table.setColumnCount(len(df_show.columns))
+        self.table.setHorizontalHeaderLabels(list(df_show.columns))
+
+        for r, (_, row) in enumerate(df_show.iterrows()):
+            for c, val in enumerate(row):
+                item = QTableWidgetItem(
+                    f'{val:.4f}' if isinstance(val, float) else str(val)
+                )
+                # z_score 컬럼에서 불량 강조
+                if df_show.columns[c] == 'z_score':
+                    try:
+                        if float(val) >= self.state.threshold:
+                            item.setBackground(QColor(255, 180, 180))
+                    except (ValueError, TypeError):
+                        pass
+                self.table.setItem(r, c, item)
+
+        self.table.resizeColumnsToContents()
+
+
+# ══════════════════════════════════════════════
+#  Tab 7: 내보내기
+# ══════════════════════════════════════════════
+
+class Tab7Export(QWidget):
+    def __init__(self, state: AppState):
+        super().__init__()
+        self.state = state
+        self._build_ui()
+
+    def _build_ui(self):
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel('내보내기'))
+
+        g_tbl = QGroupBox('결과 테이블 저장')
+        tl = QVBoxLayout(g_tbl)
+        self.btn_excel = QPushButton('Excel (.xlsx) 저장')
+        self.btn_csv   = QPushButton('CSV 저장')
+        tl.addWidget(self.btn_excel)
+        tl.addWidget(self.btn_csv)
+        layout.addWidget(g_tbl)
+
+        g_img = QGroupBox('설정 저장/불러오기')
+        il = QVBoxLayout(g_img)
+        il.addWidget(QLabel('(향후 구현 예정)'))
+        layout.addWidget(g_img)
+
+        layout.addStretch()
+
+        self.btn_excel.clicked.connect(self._save_excel)
+        self.btn_csv.clicked.connect(self._save_csv)
+
+    def _get_df(self) -> pd.DataFrame:
+        frames = []
+        for opt, res in self.state.analysis_results.items():
+            df = res.get('df_valid', pd.DataFrame()).copy()
+            c  = res.get('corrected')
+            z  = res.get('z_scores')
+            if c is not None:
+                df[f'보정값_opt{opt}'] = c
+            if z is not None:
+                df[f'z_score_opt{opt}'] = z
+            frames.append(df)
+        if not frames:
+            return self.state.df_meta.copy()
+        # 전체를 한 df로 (첫 번째 기준 outer merge)
+        merged = frames[0]
+        for f in frames[1:]:
+            new_cols = [c for c in f.columns if c not in merged.columns]
+            if new_cols:
+                merged = merged.merge(
+                    f[['tray_id', 'cell_no'] + new_cols],
+                    on=['tray_id', 'cell_no'], how='left',
+                )
+        return merged
+
+    def _save_excel(self):
+        path, _ = QFileDialog.getSaveFileName(
+            self, 'Excel 저장', 'SDM_result.xlsx',
+            'Excel (*.xlsx)'
+        )
+        if path:
+            try:
+                self._get_df().to_excel(path, index=False)
+                QMessageBox.information(self, '완료', f'저장 완료:\n{path}')
+            except Exception as e:
+                QMessageBox.critical(self, '오류', str(e))
+
+    def _save_csv(self):
+        path, _ = QFileDialog.getSaveFileName(
+            self, 'CSV 저장', 'SDM_result.csv',
+            'CSV (*.csv)'
+        )
+        if path:
+            try:
+                self._get_df().to_csv(path, index=False, encoding='utf-8-sig')
+                QMessageBox.information(self, '완료', f'저장 완료:\n{path}')
+            except Exception as e:
+                QMessageBox.critical(self, '오류', str(e))
+
+
+# ══════════════════════════════════════════════
+#  메인 윈도우
+# ══════════════════════════════════════════════
+
+class MainWindow(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle('SDM 분석 툴 — 리튬이차전지 자가방전 판정')
+        self.resize(1280, 800)
+
+        self.state = AppState()
+
+        tabs = QTabWidget()
+        self.setCentralWidget(tabs)
+
+        self.tab1 = Tab1Load(self.state)
+        self.tab2 = Tab2Explore(self.state)
+        self.tab3 = Tab3Heatmap(self.state)
+        self.tab4 = Tab4Analysis(self.state)
+        self.tab5 = Tab5Result(self.state)
+        self.tab6 = Tab6Table(self.state)
+        self.tab7 = Tab7Export(self.state)
+
+        tabs.addTab(self.tab1, '① 데이터 불러오기')
+        tabs.addTab(self.tab2, '② 원시 데이터 탐색')
+        tabs.addTab(self.tab3, '③ 히트맵')
+        tabs.addTab(self.tab4, '④ 분석 로직')
+        tabs.addTab(self.tab5, '⑤ 결과 및 판정')
+        tabs.addTab(self.tab6, '⑥ 통합 결과 테이블')
+        tabs.addTab(self.tab7, '⑦ 내보내기')
+
+        # 분석 완료 → Tab5, Tab6 자동 갱신 연결
+        self.tab4.analysis_done.connect(lambda opt: self.tab5._draw())
+        self.tab4.analysis_done.connect(lambda opt: None)  # Tab6는 수동 갱신
+
+
+# ══════════════════════════════════════════════
+#  진입점
+# ══════════════════════════════════════════════
+
+def main():
+    app = QApplication(sys.argv)
+    app.setStyle('Fusion')
+    win = MainWindow()
+    win.show()
+    sys.exit(app.exec())
+
+
+if __name__ == '__main__':
+    main()
