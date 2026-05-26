@@ -273,7 +273,7 @@ Step 1: SDM 변수 추출    Step 2: 공정 변수 추출
 | OCV3 | `OCV_OCV #03` |
 | OCV4 | `OCV_OCV #04` |
 | OCV7 | `OCV_OCV #07` |
-| 1차 충전 종료 전압 | ⚠ 미확정 (추후 확인) |
+| 1차 충전 종료 전압 | `End Voltage_Charge #01` |
 | **dOCV (3일 기준, 검증용)** | **`Delta OCV_Delta OCV #07`** |
 | 판정등급 (A/E 레이블) | `판정등급` |
 | Cell ID | `Cell ID` |
@@ -905,5 +905,5 @@ valid_cells = [c for d in present_devices for c in DEVICE_CELL_RANGE[d]]
 ### 구현 시 확인 필요 사항
 
 1. **BT2152B 출력 파일 형태** — CSV/Excel 컬럼 구조 샘플 필요
-2. **공정 데이터 파일 형태** — OCV1~7, 충전종료전압 컬럼 구조
+2. ✅ **공정 데이터 파일 형태** — 확정 (`End Voltage_Charge #01` 포함, 전체 컬럼 매핑 완료)
 3. **MVP 범위** — 전체 동시 구현 vs. 핵심 기능(히트맵+시계열+로직+판정) 먼저

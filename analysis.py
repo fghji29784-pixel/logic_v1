@@ -220,6 +220,7 @@ def correct_values(y: pd.Series,
         'delta_t': REF_DELTA_T,
         **{f'dummy_L{i}': 0.0 for i in range(2, NUM_LAYERS + 1)},
         **{f'OCV{i}': 0.0 for i in [1, 2, 3, 4, 7]},
+        'CHARGE_END_V': 0.0,
     }
     if ref:
         default_ref.update(ref)

@@ -23,11 +23,12 @@ PROCESS_COL_CELL_NO = 'CELL NO_OCV #01'   # 대표 Cell NO 컬럼
 
 # 모델 독립변수 (OCV 시점)
 PROCESS_COL_OCV = {
-    'OCV1': 'OCV_OCV #01',
-    'OCV2': 'OCV_OCV #02',
-    'OCV3': 'OCV_OCV #03',
-    'OCV4': 'OCV_OCV #04',
-    'OCV7': 'OCV_OCV #07',
+    'OCV1'        : 'OCV_OCV #01',
+    'OCV2'        : 'OCV_OCV #02',
+    'OCV3'        : 'OCV_OCV #03',
+    'OCV4'        : 'OCV_OCV #04',
+    'OCV7'        : 'OCV_OCV #07',
+    'CHARGE_END_V': 'End Voltage_Charge #01',   # 1차 충전 종료 전압
 }
 
 # 검증용 dOCV (3일 기준)
