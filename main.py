@@ -1083,7 +1083,8 @@ class Tab8Trend(QWidget):
         self.btn_add.setWordWrap(True)
         sl.addWidget(self.btn_add)
         self.lst_files = QListWidget()
-        self.lst_files.setFixedHeight(70)
+        self.lst_files.setMinimumHeight(50)
+        self.lst_files.setMaximumHeight(150)
         sl.addWidget(self.lst_files)
         self.btn_clear = QPushButton('추가 파일 초기화')
         sl.addWidget(self.btn_clear)
@@ -1113,6 +1114,12 @@ class Tab8Trend(QWidget):
         self.spin_rw.setValue(0)
         self.spin_rw.setSuffix(' Ω')
         fl.addWidget(self.spin_rw)
+        fl.addWidget(QLabel('히스토리 파일 N분 (i_*min 선택):'))
+        self.spin_hist_n = QSpinBox()
+        self.spin_hist_n.setRange(5, 30)
+        self.spin_hist_n.setValue(15)
+        self.spin_hist_n.setSuffix(' 분')
+        fl.addWidget(self.spin_hist_n)
         cl.addWidget(g_filt)
 
         # 기준선
@@ -1207,17 +1214,22 @@ class Tab8Trend(QWidget):
                 if z is not None:
                     df.loc[z.index, '_z'] = z.values
 
-            frames.append(df[['tray_id', 'cell_no', 'rwiring',
-                               PROCESS_COL_GRADE, '_raw', '_corr', '_z']
-                              + ([PROCESS_COL_GRADE] if PROCESS_COL_GRADE in df.columns else [])])
+            keep_cols = ['tray_id', 'cell_no', 'rwiring', '_raw', '_corr', '_z']
+            if PROCESS_COL_GRADE in df.columns:
+                keep_cols.insert(3, PROCESS_COL_GRADE)
+            frames.append(df[keep_cols])
 
         # 히스토리 파일
         for hdf in self._hist_frames:
             hdf2 = hdf.copy()
 
-            # raw SDM
-            i_cols = [c for c in hdf2.columns if c.startswith('i_') and c.endswith('min')]
-            hdf2['_raw'] = pd.to_numeric(hdf2[i_cols[0]], errors='coerce') * 1e6 if i_cols else np.nan
+            # raw SDM — spin_hist_n으로 명시적 선택, 없으면 첫 번째 i_*min 폴백
+            hist_n  = self.spin_hist_n.value()
+            raw_col = f'i_{hist_n}min'
+            if raw_col not in hdf2.columns:
+                i_cols  = [c for c in hdf2.columns if c.startswith('i_') and c.endswith('min')]
+                raw_col = i_cols[0] if i_cols else None
+            hdf2['_raw'] = pd.to_numeric(hdf2[raw_col], errors='coerce') * 1e6 if raw_col else np.nan
 
             # 보정값
             corr_col = f'보정값_opt{opt}' if f'보정값_opt{opt}' in hdf2.columns else \
@@ -1291,6 +1303,10 @@ class Tab8Trend(QWidget):
         tray_names = [tray_arr[boundaries[i]] for i in range(len(boundaries)-1)]
 
         # ── 그리기 ──
+        n_trays   = len(tray_names)
+        label_fs  = max(5, 8 - max(0, n_trays - 6))   # 트레이 많을수록 폰트 축소
+        fig_width = max(12, n_trays * 1.8)             # 트레이 수에 비례한 가로 폭
+        self.canvas.fig.set_size_inches(fig_width, 5)
         self.canvas.fig.clear()
         ax = self.canvas.fig.add_subplot(111)
 
@@ -1316,7 +1332,7 @@ class Tab8Trend(QWidget):
 
         # 축 설정
         ax.set_xticks(tray_mids)
-        ax.set_xticklabels(tray_names, rotation=25, ha='right', fontsize=8)
+        ax.set_xticklabels(tray_names, rotation=45, ha='right', fontsize=label_fs)
         ax.set_ylabel(y_label, fontsize=9)
         ax.set_title('다중 트레이 SDM 트렌드  (X축: 트레이 > 셀 번호 순)', fontsize=10)
         ax.legend(fontsize=8, loc='upper left')
