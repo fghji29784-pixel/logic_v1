@@ -64,6 +64,7 @@ class AppState:
         self.dep_type: str             = 'single'
         self.threshold: float          = 2.0
         self.rwiring_threshold: float | None = None
+        self.feature_list: list | None = None   # 보정 변수 선택 (None = 기본값)
         self.callbacks: list           = []   # 데이터 갱신 시 호출
 
     def notify(self):
@@ -82,10 +83,12 @@ class AnalysisWorker(QThread):
     finished = Signal(dict)
     error    = Signal(str)
 
-    def __init__(self, state: AppState, option: int):
+    def __init__(self, state: AppState, option: int,
+                 feature_list: list | None = None):
         super().__init__()
-        self.state  = state
-        self.option = option
+        self.state        = state
+        self.option       = option
+        self.feature_list = feature_list
 
     def run(self):
         try:
@@ -95,6 +98,7 @@ class AnalysisWorker(QThread):
                 n_minutes=self.state.n_minutes,
                 dep_type=self.state.dep_type,
                 rwiring_threshold=self.state.rwiring_threshold,
+                feature_list=self.feature_list,
             )
             self.finished.emit(res)
         except Exception as e:
@@ -556,6 +560,44 @@ class Tab4Analysis(QWidget):
         rl.addWidget(self.spin_rw)
         cl.addWidget(g_rw)
 
+        # 보정 변수 선택
+        g_vars = QGroupBox('보정 변수 선택')
+        vl = QVBoxLayout(g_vars)
+
+        vl.addWidget(QLabel('SDM 계열:'))
+        sdm_grid = QGridLayout()
+        self.var_checks = {}
+        sdm_items = [
+            ('v_init',    'v_init (초기전압)'),
+            ('t_final',   't_final (최종온도)'),
+            ('delta_t',   'ΔT (온도변화)'),
+            ('layer_pos', '레이어위치 (L2~L6)'),
+        ]
+        for idx, (key, label) in enumerate(sdm_items):
+            cb = QCheckBox(label)
+            cb.setChecked(True)   # SDM 계열 기본 체크
+            self.var_checks[key] = cb
+            sdm_grid.addWidget(cb, idx // 2, idx % 2)
+        vl.addLayout(sdm_grid)
+
+        vl.addWidget(QLabel('공정 계열:'))
+        proc_grid = QGridLayout()
+        proc_items = [
+            ('OCV1',         'OCV1'),
+            ('OCV2',         'OCV2'),
+            ('OCV3',         'OCV3'),
+            ('OCV4',         'OCV4'),
+            ('OCV7',         'OCV7'),
+            ('CHARGE_END_V', '1차충전종료전압'),
+        ]
+        for idx, (key, label) in enumerate(proc_items):
+            cb = QCheckBox(label)
+            cb.setChecked(False)  # 공정 계열 기본 미체크
+            self.var_checks[key] = cb
+            proc_grid.addWidget(cb, idx // 2, idx % 2)
+        vl.addLayout(proc_grid)
+        cl.addWidget(g_vars)
+
         # 실행 버튼
         self.btn_run_one = QPushButton('▶  현재 옵션 실행')
         self.btn_run_all = QPushButton('▶▶  옵션 1~5 전부 실행')
@@ -610,29 +652,33 @@ class Tab4Analysis(QWidget):
         opt      = self.opt_group.checkedId()
         dep_type = 'slope' if self.rb_slope.isChecked() else 'single'
         rw       = self.spin_rw.value() or None
-        return opt, dep_type, rw
+        checked  = [k for k, cb in self.var_checks.items() if cb.isChecked()]
+        feature_list = checked if checked else None   # 전부 해제 시 기본 동작 폴백
+        return opt, dep_type, rw, feature_list
 
     def _run_one(self):
         if self.state.df_meta.empty:
             QMessageBox.warning(self, '경고', '먼저 데이터를 불러오세요.')
             return
-        opt, dep_type, rw = self._get_settings()
+        opt, dep_type, rw, feature_list = self._get_settings()
         self.state.dep_type           = dep_type
         self.state.rwiring_threshold  = rw
-        self._launch_worker(opt)
+        self.state.feature_list       = feature_list
+        self._launch_worker(opt, feature_list)
 
     def _run_all(self):
         if self.state.df_meta.empty:
             QMessageBox.warning(self, '경고', '먼저 데이터를 불러오세요.')
             return
-        _, dep_type, rw = self._get_settings()
+        _, dep_type, rw, feature_list = self._get_settings()
         self.state.dep_type          = dep_type
         self.state.rwiring_threshold = rw
+        self.state.feature_list      = feature_list
         for opt in range(1, 6):
-            self._launch_worker(opt)
+            self._launch_worker(opt, feature_list)
 
-    def _launch_worker(self, opt: int):
-        w = AnalysisWorker(self.state, opt)
+    def _launch_worker(self, opt: int, feature_list: list | None = None):
+        w = AnalysisWorker(self.state, opt, feature_list=feature_list)
         self.workers[opt] = w
         w.finished.connect(lambda res, o=opt: self._on_done(o, res))
         w.error.connect(lambda e, o=opt:
@@ -823,6 +869,7 @@ class Tab5Result(QWidget):
                 dep_type=self.state.dep_type,
                 n_range=range(5, 16),
                 rwiring_threshold=self.state.rwiring_threshold,
+                feature_list=self.state.feature_list,
             )
             ax.plot(curve_df['n_minutes'], curve_df['d_prime'], marker='o')
             ax.axhline(2.0, color='red', linestyle='--', alpha=0.5, label="d'=2")

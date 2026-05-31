@@ -43,9 +43,23 @@ SDM_FEATURES     = ['v_init', 't_final', 'delta_t'] + [f'dummy_L{i}' for i in ra
 PROCESS_FEATURES = list(PROCESS_COL_OCV.keys())   # OCV1~4, OCV7
 
 
-def get_feature_cols(include_process: bool = False, df: pd.DataFrame | None = None) -> list[str]:
-    """독립변수 목록 반환. df 전달 시 실제 존재하는 컬럼만 필터링."""
-    cols = SDM_FEATURES + (PROCESS_FEATURES if include_process else [])
+def get_feature_cols(include_process: bool = False,
+                     df: pd.DataFrame | None = None,
+                     feature_list: list[str] | None = None) -> list[str]:
+    """
+    독립변수 목록 반환. df 전달 시 실제 존재하는 컬럼만 필터링.
+    feature_list가 전달되면 해당 목록만 사용 (include_process 무시).
+    'layer_pos' 키는 dummy_L2~dummy_L6 으로 자동 확장.
+    """
+    if feature_list is not None:
+        cols = []
+        for f in feature_list:
+            if f == 'layer_pos':
+                cols += [f'dummy_L{i}' for i in range(2, NUM_LAYERS + 1)]
+            else:
+                cols.append(f)
+    else:
+        cols = SDM_FEATURES + (PROCESS_FEATURES if include_process else [])
     if df is not None:
         cols = [c for c in cols if c in df.columns]
     return cols
@@ -325,7 +339,8 @@ def separation_curve(df_meta: pd.DataFrame,
                      dep_type: str = 'single',
                      n_range: range | None = None,
                      rwiring_threshold: float | None = None,
-                     ref: dict | None = None) -> pd.DataFrame:
+                     ref: dict | None = None,
+                     feature_list: list[str] | None = None) -> pd.DataFrame:
     """
     N분을 5~15 구간에서 바꿔가며 d_prime 계산 → 최단 판정 시간 탐색용.
     반환: DataFrame [n_minutes, d_prime]
@@ -339,7 +354,8 @@ def separation_curve(df_meta: pd.DataFrame,
             res = run_analysis(df_meta, option=option, n_minutes=n,
                                dep_type=dep_type,
                                rwiring_threshold=rwiring_threshold,
-                               ref_conditions=ref)
+                               ref_conditions=ref,
+                               feature_list=feature_list)
             dp = res['metrics'].get('d_prime', np.nan)
         except Exception:
             dp = np.nan
@@ -357,7 +373,8 @@ def run_analysis(df_meta: pd.DataFrame,
                  n_minutes: int,
                  dep_type: str = 'single',
                  rwiring_threshold: float | None = None,
-                 ref_conditions: dict | None = None) -> dict:
+                 ref_conditions: dict | None = None,
+                 feature_list: list[str] | None = None) -> dict:
     """
     옵션 1~5 분석 파이프라인.
 
@@ -380,7 +397,9 @@ def run_analysis(df_meta: pd.DataFrame,
 
     # 독립변수 목록
     include_process = option in [2, 4, 5]
-    feature_cols    = get_feature_cols(include_process=include_process, df=df)
+    feature_cols    = get_feature_cols(
+        include_process=include_process, df=df, feature_list=feature_list
+    )
 
     y = df['y']
     X = df[feature_cols]
