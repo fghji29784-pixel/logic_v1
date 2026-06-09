@@ -66,12 +66,12 @@ def _read_text(filepath: str) -> str:
 # ══════════════════════════════════════════════
 
 def _split_sections(content: str) -> dict[str, list[str]]:
-    """Cat XXX 또는 [Cat XXX] 섹션별로 분리"""
+    """Cat XXX, Cat_XXX, or [Cat XXX] 섹션별로 분리"""
     sections: dict[str, list[str]] = {}
     current: str | None = None
     for raw in content.splitlines():
         line = raw.strip()
-        m = re.match(r'^\[?Cat\s+(.+?)\]?$', line)
+        m = re.match(r'^\[?Cat[\s_]+(.+?)\]?$', line)
         if m:
             current = m.group(1).strip()
             sections[current] = []
