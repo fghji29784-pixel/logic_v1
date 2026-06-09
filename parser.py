@@ -66,12 +66,12 @@ def _read_text(filepath: str) -> str:
 # ══════════════════════════════════════════════
 
 def _split_sections(content: str) -> dict[str, list[str]]:
-    """[Cat XXX] 섹션별로 분리"""
+    """Cat XXX 또는 [Cat XXX] 섹션별로 분리"""
     sections: dict[str, list[str]] = {}
     current: str | None = None
     for raw in content.splitlines():
         line = raw.strip()
-        m = re.match(r'^\[Cat\s+(.+?)\]$', line)
+        m = re.match(r'^\[?Cat\s+(.+?)\]?$', line)
         if m:
             current = m.group(1).strip()
             sections[current] = []
@@ -80,31 +80,46 @@ def _split_sections(content: str) -> dict[str, list[str]]:
     return sections
 
 
+def _line_key_value(line: str) -> tuple[str, str] | None:
+    """Colon, tab, or pipe separated metadata row."""
+    if ':' in line:
+        k, v = line.split(':', 1)
+        return k.strip(), v.strip()
+
+    parts = _split_line(line)
+    if len(parts) >= 2 and parts[0]:
+        return parts[0].strip(), parts[1].strip()
+
+    return None
+
+
 def _parse_app_info(lines: list[str]) -> dict:
     out = {}
     for line in lines:
-        if ':' in line:
-            k, v = line.split(':', 1)
-            out[k.strip()] = v.strip()
+        kv = _line_key_value(line)
+        if kv is not None:
+            k, v = kv
+            out[k] = v
     return out
 
 
 def _parse_global(lines: list[str]) -> dict:
     out = {'test_duration': 15, 'tint': 10}
     for line in lines:
-        if ':' in line:
-            k, v = line.split(':', 1)
-            k, v = k.strip(), v.strip()
-            if k == 'TestDuration':
-                try:
-                    out['test_duration'] = int(v)
-                except ValueError:
-                    pass
-            elif k == 'Tint':
-                try:
-                    out['tint'] = int(v)
-                except ValueError:
-                    pass
+        kv = _line_key_value(line)
+        if kv is None:
+            continue
+        k, v = kv
+        if k == 'TestDuration':
+            try:
+                out['test_duration'] = int(float(v))
+            except ValueError:
+                pass
+        elif k == 'Tint':
+            try:
+                out['tint'] = int(float(v))
+            except ValueError:
+                pass
     return out
 
 
@@ -114,7 +129,18 @@ def _parse_per_chan(lines: list[str]) -> dict[int, dict]:
     if not lines:
         return channels
 
-    headers = _split_line(lines[0])
+    header_idx = None
+    for i, line in enumerate(lines):
+        parts = _split_line(line)
+        lowered = [p.lower() for p in parts]
+        if any('channel' in p for p in lowered):
+            header_idx = i
+            break
+
+    if header_idx is None:
+        return channels
+
+    headers = _split_line(lines[header_idx])
     # 컬럼 인덱스 — or 연산자는 0(첫 번째 컬럼)을 falsy로 처리하므로 명시적 None 체크
     def idx(keyword):
         for i, h in enumerate(headers):
@@ -123,18 +149,23 @@ def _parse_per_chan(lines: list[str]) -> dict[int, dict]:
         return None
 
     i_ch = idx('Channel');      i_ch = 0 if i_ch is None else i_ch
-    i_en = idx('IsChanEnabled'); i_en = 1 if i_en is None else i_en
+    i_en = idx('IsChanEnabled')
+    if i_en is None:
+        i_en = idx('IsChanCheck')
+    if i_en is None:
+        i_en = idx('Enabled')
+    i_en = 1 if i_en is None else i_en
     i_rw = idx('Rwiring')
     if i_rw is None:
         i_rw = idx('Rwire')
 
-    for line in lines[1:]:
+    for line in lines[header_idx + 1:]:
         parts = _split_line(line)
         if len(parts) < 2:
             continue
         try:
             ch      = int(parts[i_ch])
-            enabled = parts[i_en].upper() == 'TRUE'
+            enabled = parts[i_en].strip().upper() in ('TRUE', '1', 'Y', 'YES')
             rwiring = float(parts[i_rw]) if (i_rw is not None and i_rw < len(parts)) else 0.0
             channels[ch] = {'enabled': enabled, 'rwiring': rwiring}
         except (ValueError, IndexError):
@@ -147,9 +178,20 @@ def _parse_measurements(lines: list[str]) -> pd.DataFrame | None:
     if not lines:
         return None
 
-    headers = _split_line(lines[0])
+    header_idx = None
+    for i, line in enumerate(lines):
+        parts = _split_line(line)
+        lowered = [p.lower() for p in parts]
+        if lowered and lowered[0] == 'time' and any(re.fullmatch(r'[iv]\d+', p) for p in lowered[1:]):
+            header_idx = i
+            break
+
+    if header_idx is None:
+        return None
+
+    headers = _split_line(lines[header_idx])
     rows = []
-    for line in lines[1:]:
+    for line in lines[header_idx + 1:]:
         parts = _split_line(line)
         if parts:
             rows.append(parts)
