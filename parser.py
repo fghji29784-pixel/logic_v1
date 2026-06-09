@@ -46,8 +46,13 @@ def detect_device_no(filename: str) -> int | None:
 
 
 def _split_line(line: str) -> list[str]:
-    """탭 또는 파이프(`|`)로 분리 후 공백 제거"""
-    sep = '\t' if '\t' in line else '|'
+    """탭, 콤마, 또는 파이프(`|`)로 분리 후 공백 제거"""
+    if '\t' in line:
+        sep = '\t'
+    elif ',' in line:
+        sep = ','
+    else:
+        sep = '|'
     return [p.strip() for p in line.split(sep)]
 
 
