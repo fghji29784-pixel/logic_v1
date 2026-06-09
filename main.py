@@ -1127,7 +1127,7 @@ class Tab8Trend(QWidget):
         self.lbl_session.setWordWrap(True)
         sl.addWidget(self.lbl_session)
         self.btn_add = QPushButton('이전 결과 파일 추가 (Tab7 내보내기)…')
-        self.btn_add.setWordWrap(True)
+        self.btn_add.setToolTip('이전 결과 파일 추가 (Tab7 내보내기)')
         sl.addWidget(self.btn_add)
         self.lst_files = QListWidget()
         self.lst_files.setMinimumHeight(50)
