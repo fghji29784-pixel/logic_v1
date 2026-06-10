@@ -50,3 +50,10 @@ ROBUST_HIGH_PCT = 90
 
 # ── VIF 경고 기준 ──────────────────────────────
 VIF_WARN = 10.0
+
+
+def cell_to_label(cell_no: int) -> str:
+    """셀 번호(1~144) → 위치 레이블 (A01~L12)"""
+    row_letter = chr(ord('A') + (cell_no - 1) // 12)
+    col_number = (cell_no - 1) % 12 + 1
+    return f'{row_letter}{col_number:02d}'

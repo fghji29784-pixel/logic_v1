@@ -43,6 +43,7 @@ from constants import (
     TOTAL_CELLS, TRAY_ROWS, TRAY_COLS, NUM_LAYERS,
     PROCESS_COL_GRADE, PROCESS_COL_DOCV,
     REF_V_INIT, REF_T_FINAL,
+    cell_to_label,
 )
 
 # ── matplotlib 한글 폰트 ──────────────────────
@@ -286,36 +287,70 @@ class Tab2Explore(QWidget):
     def _build_ui(self):
         layout = QHBoxLayout(self)
 
-        # 왼쪽 컨트롤
+        # ── 왼쪽 컨트롤 ──────────────────────────
         ctrl = QWidget()
-        ctrl.setFixedWidth(200)
+        ctrl.setFixedWidth(230)
         cl = QVBoxLayout(ctrl)
 
         cl.addWidget(QLabel('트레이:'))
         self.cb_tray = QComboBox()
         cl.addWidget(self.cb_tray)
 
-        cl.addWidget(QLabel('셀 번호:'))
+        # 오버레이 그룹
+        g_ov = QGroupBox('전체 오버레이')
+        ovl = QVBoxLayout(g_ov)
+
+        h_btns = QHBoxLayout()
+        self.btn_all  = QPushButton('전체 선택')
+        self.btn_none = QPushButton('전체 해제')
+        self.btn_all.setFixedHeight(24)
+        self.btn_none.setFixedHeight(24)
+        h_btns.addWidget(self.btn_all)
+        h_btns.addWidget(self.btn_none)
+        ovl.addLayout(h_btns)
+
+        ovl.addWidget(QLabel('제외 셀 (체크 해제):'))
+        self.lst_cells = QListWidget()
+        self.lst_cells.setMinimumHeight(120)
+        self.lst_cells.setMaximumHeight(220)
+        ovl.addWidget(self.lst_cells)
+
+        self.btn_draw_ov = QPushButton('▶ 오버레이 그리기')
+        self.btn_draw_ov.setFixedHeight(30)
+        font_b = self.btn_draw_ov.font()
+        font_b.setBold(True)
+        self.btn_draw_ov.setFont(font_b)
+        ovl.addWidget(self.btn_draw_ov)
+
+        self.lbl_picked = QLabel('클릭: —')
+        self.lbl_picked.setWordWrap(True)
+        ovl.addWidget(self.lbl_picked)
+        cl.addWidget(g_ov)
+
+        # 단일 셀 그룹
+        g_sc = QGroupBox('단일 셀 보기')
+        scl = QVBoxLayout(g_sc)
+        scl.addWidget(QLabel('셀 번호:'))
         self.cb_cell = QComboBox()
-        cl.addWidget(self.cb_cell)
-
+        scl.addWidget(self.cb_cell)
         self.btn_plot = QPushButton('그래프 그리기')
-        cl.addWidget(self.btn_plot)
-
-        cl.addWidget(QLabel('── 전체 오버레이 ──'))
-        self.btn_overlay = QPushButton('전류 오버레이')
-        cl.addWidget(self.btn_overlay)
+        scl.addWidget(self.btn_plot)
+        cl.addWidget(g_sc)
 
         cl.addStretch()
         layout.addWidget(ctrl)
 
-        # 오른쪽 캔버스 (3개 서브플롯)
+        # ── 오른쪽 캔버스 (3개 서브플롯) ─────────
         self.canvas = PlotCanvas(figsize=(10, 7))
         layout.addWidget(self.canvas)
 
+        # 시그널
         self.cb_tray.currentTextChanged.connect(self._update_cells)
+        self.btn_all.clicked.connect(self._select_all)
+        self.btn_none.clicked.connect(self._deselect_all)
+        self.btn_draw_ov.clicked.connect(self._plot_overlay)
         self.btn_plot.clicked.connect(self._plot_cell)
-        self.btn_overlay.clicked.connect(self._plot_overlay)
+        self.canvas.mpl_connect('pick_event', self._on_pick)
 
     def _refresh(self):
         self.cb_tray.clear()
@@ -324,20 +359,136 @@ class Tab2Explore(QWidget):
         trays = self.state.df_ts['tray_id'].unique().tolist()
         self.cb_tray.addItems(trays)
 
-    def _update_cells(self, tray):
+    def _update_cells(self, tray: str):
         self.cb_cell.clear()
+        self.lst_cells.clear()
         if self.state.df_ts.empty or not tray:
             return
-        cells = sorted(self.state.df_ts[self.state.df_ts['tray_id'] == tray]['cell_no'].unique())
+
+        cells = sorted(
+            self.state.df_ts[self.state.df_ts['tray_id'] == tray]['cell_no']
+            .dropna().astype(int).unique()
+        )
         self.cb_cell.addItems([str(c) for c in cells])
 
-    def _plot_cell(self):
+        grade_col  = PROCESS_COL_GRADE
+        grade_map: dict = {}
+        if not self.state.df_meta.empty and grade_col in self.state.df_meta.columns:
+            sub = self.state.df_meta[
+                self.state.df_meta['tray_id'] == tray
+            ].dropna(subset=['cell_no'])
+            grade_map = dict(zip(
+                sub['cell_no'].astype(int),
+                sub[grade_col].astype(str).str.strip().str.upper(),
+            ))
+
+        for c in cells:
+            grade = grade_map.get(c, '')
+            text  = f'{c}  ({cell_to_label(c)})'
+            if grade == 'E':
+                text += '  ★E'
+            item = QListWidgetItem(text)
+            item.setData(Qt.UserRole, int(c))
+            item.setCheckState(Qt.Checked)
+            if grade == 'E':
+                item.setForeground(QColor(200, 0, 0))
+            self.lst_cells.addItem(item)
+
+        QTimer.singleShot(50, self._plot_overlay)
+
+    def _select_all(self):
+        for i in range(self.lst_cells.count()):
+            self.lst_cells.item(i).setCheckState(Qt.Checked)
+
+    def _deselect_all(self):
+        for i in range(self.lst_cells.count()):
+            self.lst_cells.item(i).setCheckState(Qt.Unchecked)
+
+    def _get_checked_cells(self) -> set:
+        checked = set()
+        for i in range(self.lst_cells.count()):
+            item = self.lst_cells.item(i)
+            if item.checkState() == Qt.Checked:
+                checked.add(int(item.data(Qt.UserRole)))
+        return checked
+
+    def _get_cell_color(self, tray: str, cell_no: int) -> tuple:
+        grade_col = PROCESS_COL_GRADE
+        if not self.state.df_meta.empty and grade_col in self.state.df_meta.columns:
+            sub = self.state.df_meta[
+                (self.state.df_meta['tray_id'] == tray) &
+                (self.state.df_meta['cell_no'].astype(int) == cell_no)
+            ]
+            if not sub.empty:
+                grade = str(sub.iloc[0][grade_col]).strip().upper()
+                if grade == 'E':
+                    return 'red', 0.75
+        return 'black', 0.30
+
+    def _plot_overlay(self):
         tray = self.cb_tray.currentText()
+        if not tray or self.state.df_ts.empty:
+            return
+
+        checked = self._get_checked_cells()
+        sub     = self.state.df_ts[self.state.df_ts['tray_id'] == tray]
+
+        self.canvas.fig.clear()
+        ax1, ax2, ax3 = self.canvas.fig.subplots(3, 1, sharex=True)
+
+        for cell, grp in sub.groupby('cell_no'):
+            if int(cell) not in checked:
+                continue
+            t            = grp['t_sec'].values / 60
+            color, alpha = self._get_cell_color(tray, int(cell))
+            lw           = 1.0 if color == 'red' else 0.7
+            zorder       = 3   if color == 'red' else 2
+
+            l1, = ax1.plot(t, grp['current_A'].values * 1e6,
+                           color=color, alpha=alpha, linewidth=lw,
+                           zorder=zorder, picker=5)
+            l1._cell_no = int(cell)
+
+            l2, = ax2.plot(t, grp['voltage_V'].values * 1000,
+                           color=color, alpha=alpha, linewidth=lw,
+                           zorder=zorder, picker=5)
+            l2._cell_no = int(cell)
+
+            l3, = ax3.plot(t, grp['temp_C'].values,
+                           color=color, alpha=alpha, linewidth=lw,
+                           zorder=zorder, picker=5)
+            l3._cell_no = int(cell)
+
+        has_grade = (not self.state.df_meta.empty and
+                     PROCESS_COL_GRADE in self.state.df_meta.columns)
+        legend_note = '  (빨=E등급)' if has_grade else ''
+
+        ax1.set_ylabel('전류 (µA)')
+        ax1.set_title(f'{tray} — 전체 셀 오버레이{legend_note}')
+        ax1.grid(True, alpha=0.3)
+        ax2.set_ylabel('전압 (mV)')
+        ax2.grid(True, alpha=0.3)
+        ax3.set_ylabel('온도 (°C)')
+        ax3.set_xlabel('시간 (분)')
+        ax3.grid(True, alpha=0.3)
+
+        self.canvas.fig.tight_layout()
+        self.canvas.draw()
+
+    def _on_pick(self, event):
+        cell_no = getattr(event.artist, '_cell_no', None)
+        if cell_no is not None:
+            self.lbl_picked.setText(
+                f'클릭: {cell_no}번  ({cell_to_label(cell_no)})'
+            )
+
+    def _plot_cell(self):
+        tray      = self.cb_tray.currentText()
         cell_text = self.cb_cell.currentText()
         if not tray or not cell_text:
             return
         cell = int(cell_text)
-        sub = self.state.df_ts[
+        sub  = self.state.df_ts[
             (self.state.df_ts['tray_id'] == tray) &
             (self.state.df_ts['cell_no']  == cell)
         ]
@@ -347,10 +498,10 @@ class Tab2Explore(QWidget):
         self.canvas.fig.clear()
         ax1, ax2, ax3 = self.canvas.fig.subplots(3, 1, sharex=True)
 
-        t = sub['t_sec'].values / 60  # 초→분
-        ax1.plot(t, sub['current_A'].values * 1e6)
+        t = sub['t_sec'].values / 60
+        ax1.plot(t, sub['current_A'].values * 1e6, color='steelblue')
         ax1.set_ylabel('전류 (µA)')
-        ax1.set_title(f'Tray: {tray}  Cell: {cell}')
+        ax1.set_title(f'Tray: {tray}  |  Cell: {cell}  ({cell_to_label(cell)})')
         ax1.grid(True, alpha=0.3)
 
         ax2.plot(t, sub['voltage_V'].values * 1000, color='orange')
@@ -362,27 +513,6 @@ class Tab2Explore(QWidget):
         ax3.set_xlabel('시간 (분)')
         ax3.grid(True, alpha=0.3)
 
-        self.canvas.fig.tight_layout()
-        self.canvas.draw()
-
-    def _plot_overlay(self):
-        tray = self.cb_tray.currentText()
-        if not tray or self.state.df_ts.empty:
-            return
-        sub = self.state.df_ts[self.state.df_ts['tray_id'] == tray]
-
-        self.canvas.fig.clear()
-        ax = self.canvas.fig.add_subplot(111)
-
-        for cell, grp in sub.groupby('cell_no'):
-            t = grp['t_sec'].values / 60
-            i = grp['current_A'].values * 1e6
-            ax.plot(t, i, alpha=0.4, linewidth=0.8)
-
-        ax.set_xlabel('시간 (분)')
-        ax.set_ylabel('전류 (µA)')
-        ax.set_title(f'{tray} — 전체 셀 전류 오버레이')
-        ax.grid(True, alpha=0.3)
         self.canvas.fig.tight_layout()
         self.canvas.draw()
 
@@ -414,6 +544,17 @@ class Tab3Heatmap(QWidget):
         ])
         ctrl.addWidget(self.cb_type)
 
+        self.chk_clip = QCheckBox('클리핑')
+        self.chk_clip.setChecked(True)
+        self.chk_clip.setToolTip('상위 N% 초과값을 colormap 최대값으로 클리핑')
+        ctrl.addWidget(self.chk_clip)
+        self.spin_clip = QSpinBox()
+        self.spin_clip.setRange(80, 100)
+        self.spin_clip.setValue(99)
+        self.spin_clip.setSuffix('%')
+        self.spin_clip.setFixedWidth(60)
+        ctrl.addWidget(self.spin_clip)
+
         self.btn_draw = QPushButton('그리기')
         ctrl.addWidget(self.btn_draw)
         ctrl.addStretch()
@@ -422,7 +563,6 @@ class Tab3Heatmap(QWidget):
         self.canvas = PlotCanvas(figsize=(8, 7))
         layout.addWidget(self.canvas)
 
-        self.cb_tray.currentTextChanged.connect(lambda _: None)
         self.btn_draw.clicked.connect(self._draw)
 
     def _refresh(self):
@@ -436,17 +576,17 @@ class Tab3Heatmap(QWidget):
         self.cb_type.setItemText(0, f'SDM 전류 (i_{n}min)')
 
     def _get_grid(self, tray: str, col: str) -> np.ndarray:
-        """셀 번호 → 12×12 그리드 변환"""
+        """셀 번호 → 12×12 그리드 변환 (y=1~12, x=A~L)"""
         sub = self.state.df_meta[self.state.df_meta['tray_id'] == tray]
         grid = np.full((TRAY_ROWS, TRAY_COLS), np.nan)
         if col not in sub.columns:
             return grid
         for _, row in sub.iterrows():
-            cn = int(row['cell_no']) - 1
-            r  = cn // TRAY_COLS
-            c  = cn %  TRAY_COLS
+            cn    = int(row['cell_no']) - 1
+            x_idx = cn // TRAY_COLS   # A~L (0~11)
+            y_idx = cn %  TRAY_COLS   # 1~12 (0~11)
             try:
-                grid[r, c] = float(row[col])
+                grid[y_idx, x_idx] = float(row[col])
             except (ValueError, TypeError):
                 pass
         return grid
@@ -459,27 +599,29 @@ class Tab3Heatmap(QWidget):
 
         n   = self.state.n_minutes
         col_map = {
-            0: (f'i_{n}min', 'SDM 전류 (µA)', lambda v: v * 1e6),
-            1: ('t_final',   '온도 (°C)',       lambda v: v),
-            2: ('rwiring',   'Rwiring (Ω)',      lambda v: v),
-            3: (PROCESS_COL_DOCV, 'dOCV #07',   lambda v: v),
-            4: (PROCESS_COL_GRADE, '판정등급',   None),
+            0: (f'i_{n}min', f'SDM 전류 (µA)',  lambda v: v * 1e6),
+            1: ('t_final',   '온도 (°C)',         lambda v: v),
+            2: ('rwiring',   'Rwiring (Ω)',        lambda v: v),
+            3: (PROCESS_COL_DOCV, 'dOCV #07',     lambda v: v),
+            4: (PROCESS_COL_GRADE, '판정등급',     None),
         }
         col, title, transform = col_map[kind]
 
         self.canvas.fig.clear()
         ax = self.canvas.fig.add_subplot(111)
 
+        row_labels = [chr(ord('A') + i) for i in range(TRAY_COLS)]
+        col_labels  = list(range(1, TRAY_ROWS + 1))
+
         if kind == 4:
-            # 판정등급: A=0, E=1
             sub = self.state.df_meta[self.state.df_meta['tray_id'] == tray]
             grid = np.full((TRAY_ROWS, TRAY_COLS), np.nan)
             for _, row in sub.iterrows():
-                cn = int(row['cell_no']) - 1
-                r  = cn // TRAY_COLS
-                c  = cn %  TRAY_COLS
+                cn    = int(row['cell_no']) - 1
+                x_idx = cn // TRAY_COLS
+                y_idx = cn %  TRAY_COLS
                 grade = str(row.get(PROCESS_COL_GRADE, '')).upper()
-                grid[r, c] = 1.0 if grade == 'E' else 0.0
+                grid[y_idx, x_idx] = 1.0 if grade == 'E' else 0.0
             cmap = mcolors.ListedColormap(['black', 'red'])
             im = ax.imshow(grid, cmap=cmap, vmin=0, vmax=1, aspect='equal')
             ax.set_title(f'{tray} — 판정등급 (검=A, 빨=E)')
@@ -487,14 +629,23 @@ class Tab3Heatmap(QWidget):
             grid = self._get_grid(tray, col)
             if transform:
                 grid = transform(grid)
-            im = ax.imshow(grid, cmap='RdYlGn_r', aspect='equal')
+            vmax_val = None
+            if self.chk_clip.isChecked():
+                flat = grid[~np.isnan(grid)]
+                if len(flat) > 0:
+                    vmax_val = np.percentile(flat, self.spin_clip.value())
+            im = ax.imshow(grid, cmap='RdYlGn_r', aspect='equal', vmax=vmax_val)
             self.canvas.fig.colorbar(im, ax=ax)
-            ax.set_title(f'{tray} — {title}')
+            clip_note = (f'  (상위 {self.spin_clip.value()}% 클리핑)'
+                         if self.chk_clip.isChecked() else '')
+            ax.set_title(f'{tray} — {title}{clip_note}')
 
         ax.set_xticks(range(TRAY_COLS))
         ax.set_yticks(range(TRAY_ROWS))
-        ax.set_xticklabels(range(1, TRAY_COLS + 1), fontsize=7)
-        ax.set_yticklabels(range(1, TRAY_ROWS + 1), fontsize=7)
+        ax.set_xticklabels(row_labels, fontsize=8)
+        ax.set_yticklabels(col_labels, fontsize=8)
+        ax.set_xlabel('행 (A–L)', fontsize=9)
+        ax.set_ylabel('열 (1–12)', fontsize=9)
         self.canvas.fig.tight_layout()
         self.canvas.draw()
 
