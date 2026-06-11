@@ -28,7 +28,10 @@ from PySide6.QtGui import QFont, QColor
 
 import matplotlib
 matplotlib.use('QtAgg')
-from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
+from matplotlib.backends.backend_qtagg import (
+    FigureCanvasQTAgg as FigureCanvas,
+    NavigationToolbar2QT,
+)
 from matplotlib.figure import Figure
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
@@ -281,6 +284,8 @@ class Tab2Explore(QWidget):
     def __init__(self, state: AppState):
         super().__init__()
         self.state = state
+        self._highlighted_cell: int | None = None
+        self._line_refs: dict = {}
         self._build_ui()
         state.callbacks.append(self._refresh)
 
@@ -322,8 +327,15 @@ class Tab2Explore(QWidget):
         self.btn_draw_ov.setFont(font_b)
         ovl.addWidget(self.btn_draw_ov)
 
-        self.lbl_picked = QLabel('클릭: —')
+        self.lbl_picked = QLabel('선택: —')
         self.lbl_picked.setWordWrap(True)
+        font_p = self.lbl_picked.font()
+        font_p.setBold(True)
+        self.lbl_picked.setFont(font_p)
+        self.lbl_picked.setStyleSheet(
+            'color: royalblue; background: #eef4ff;'
+            ' padding: 4px; border-radius: 3px;'
+        )
         ovl.addWidget(self.lbl_picked)
         cl.addWidget(g_ov)
 
@@ -340,9 +352,15 @@ class Tab2Explore(QWidget):
         cl.addStretch()
         layout.addWidget(ctrl)
 
-        # ── 오른쪽 캔버스 (3개 서브플롯) ─────────
+        # ── 오른쪽: 툴바 + 캔버스 ────────────────
+        right = QWidget()
+        rl = QVBoxLayout(right)
+        rl.setContentsMargins(0, 0, 0, 0)
         self.canvas = PlotCanvas(figsize=(10, 7))
-        layout.addWidget(self.canvas)
+        self.toolbar = NavigationToolbar2QT(self.canvas, self)
+        rl.addWidget(self.toolbar)
+        rl.addWidget(self.canvas)
+        layout.addWidget(right)
 
         # 시그널
         self.cb_tray.currentTextChanged.connect(self._update_cells)
@@ -430,6 +448,8 @@ class Tab2Explore(QWidget):
         if not tray or self.state.df_ts.empty:
             return
 
+        self._line_refs        = {}
+        self._highlighted_cell = None
         checked = self._get_checked_cells()
         sub     = self.state.df_ts[self.state.df_ts['tray_id'] == tray]
 
@@ -459,6 +479,13 @@ class Tab2Explore(QWidget):
                            zorder=zorder, picker=5)
             l3._cell_no = int(cell)
 
+            for ln in (l1, l2, l3):
+                ln._orig_color  = color
+                ln._orig_alpha  = alpha
+                ln._orig_lw     = lw
+                ln._orig_zorder = zorder
+            self._line_refs[int(cell)] = [l1, l2, l3]
+
         has_grade = (not self.state.df_meta.empty and
                      PROCESS_COL_GRADE in self.state.df_meta.columns)
         legend_note = '  (빨=E등급)' if has_grade else ''
@@ -477,10 +504,40 @@ class Tab2Explore(QWidget):
 
     def _on_pick(self, event):
         cell_no = getattr(event.artist, '_cell_no', None)
-        if cell_no is not None:
-            self.lbl_picked.setText(
-                f'클릭: {cell_no}번  ({cell_to_label(cell_no)})'
+        if cell_no is None:
+            return
+
+        # 이전 하이라이트 복원
+        if self._highlighted_cell is not None:
+            for ln in self._line_refs.get(self._highlighted_cell, []):
+                ln.set_color(ln._orig_color)
+                ln.set_alpha(ln._orig_alpha)
+                ln.set_linewidth(ln._orig_lw)
+                ln.set_zorder(ln._orig_zorder)
+
+        # 새 하이라이트 적용
+        for ln in self._line_refs.get(cell_no, []):
+            ln.set_color('royalblue')
+            ln.set_alpha(1.0)
+            ln.set_linewidth(2.5)
+            ln.set_zorder(10)
+
+        self._highlighted_cell = cell_no
+        label = cell_to_label(cell_no)
+        self.lbl_picked.setText(f'선택: {cell_no}번  ({label})')
+
+        axes = self.canvas.fig.get_axes()
+        if axes:
+            tray = self.cb_tray.currentText()
+            has_grade = (not self.state.df_meta.empty and
+                         PROCESS_COL_GRADE in self.state.df_meta.columns)
+            legend_note = '  (빨=E등급)' if has_grade else ''
+            axes[0].set_title(
+                f'{tray} — 전체 셀 오버레이{legend_note}'
+                f'  │  선택: {cell_no}번 ({label})'
             )
+
+        self.canvas.draw_idle()
 
     def _plot_cell(self):
         tray      = self.cb_tray.currentText()
