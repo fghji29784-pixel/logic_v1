@@ -682,6 +682,13 @@ class Tab3Heatmap(QWidget):
             cmap = mcolors.ListedColormap(['black', 'red'])
             im = ax.imshow(grid, cmap=cmap, vmin=0, vmax=1, aspect='equal')
             ax.set_title(f'{tray} — 판정등급 (검=A, 빨=E)')
+            for iy in range(TRAY_ROWS):
+                for ix in range(TRAY_COLS):
+                    val = grid[iy, ix]
+                    if not np.isnan(val):
+                        ax.text(ix, iy, 'E' if val == 1.0 else 'A',
+                                ha='center', va='center', fontsize=6,
+                                color='white', fontweight='bold')
         else:
             grid = self._get_grid(tray, col)
             if transform:
@@ -696,6 +703,19 @@ class Tab3Heatmap(QWidget):
             clip_note = (f'  (상위 {self.spin_clip.value()}% 클리핑)'
                          if self.chk_clip.isChecked() else '')
             ax.set_title(f'{tray} — {title}{clip_note}')
+            fmt_map = {0: '{:.2f}', 1: '{:.1f}', 2: '{:.4f}', 3: '{:.1f}'}
+            fmt = fmt_map.get(kind, '{:.2f}')
+            norm_obj = im.norm
+            cmap_obj = im.cmap
+            for iy in range(TRAY_ROWS):
+                for ix in range(TRAY_COLS):
+                    val = grid[iy, ix]
+                    if not np.isnan(val):
+                        rgba = cmap_obj(norm_obj(val))
+                        lum = 0.299 * rgba[0] + 0.587 * rgba[1] + 0.114 * rgba[2]
+                        tc = 'white' if lum < 0.5 else 'black'
+                        ax.text(ix, iy, fmt.format(val),
+                                ha='center', va='center', fontsize=5.5, color=tc)
 
         ax.set_xticks(range(TRAY_COLS))
         ax.set_yticks(range(TRAY_ROWS))
