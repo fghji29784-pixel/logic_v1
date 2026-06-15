@@ -474,7 +474,7 @@ I(t) ≈ ISD · t/τ  (선형 구간)
 | 파일 | 개수 | 비고 |
 |---|---|---|
 | KSS 파일 | 5개 | raw — 설비별 전류·전압·Rwiring |
-| TEMP_DATA | 1개 | raw — 전체 144셀 온도 |
+| TEMP (구: TEMP_DATA) | 1개 | raw — 전체 144셀 온도 |
 | MEDIAN_CURRENT | 1개 | 파생 (KSS 합산 결과) — **무시** |
 | MEDIAN_VOLTATE | 1개 | 파생 (KSS 합산 결과) — **무시** |
 | TEST_DATA, VITT_DATA | 각 1개 | 파생 — **무시** |
@@ -526,7 +526,7 @@ I(t) ≈ ISD · t/τ  (선형 구간)
 
 ---
 
-### TEMP_DATA 파일 구조
+### TEMP 파일 구조 (구버전 파일명: TEMP_DATA)
 
 ```
 TIME | T(01) | T(02) | T(03) | ... | T(144)
@@ -574,8 +574,8 @@ cell_no = DEVICE_OFFSET[device_no] + channel_no  # channel_no: 1-based
 | channel_no | KSS | 설비 내 채널 번호 |
 | Rwiring | KSS TestSetupPerChan | 배선 저항 (Ω) |
 | V_init | KSS Measurements | 측정 시작 시점 전압 (V) |
-| T_init | TEMP_DATA | 측정 시작 시점 온도 (°C) |
-| T_final | TEMP_DATA | 측정 종료 시점 온도 (°C) |
+| T_init | TEMP | 측정 시작 시점 온도 (°C) |
+| T_final | TEMP | 측정 종료 시점 온도 (°C) |
 | delta_T | 계산 | T_final − T_init |
 | I_Nmin | KSS Measurements | N분 시점 전류값 (A) — 판정 종속변수 후보 |
 | slope_0_N | KSS Measurements | 0~N분 구간 전류 기울기 (A/s) — v2 종속변수 |
@@ -589,7 +589,7 @@ cell_no = DEVICE_OFFSET[device_no] + channel_no  # channel_no: 1-based
 | t_sec | KSS/TEMP | 시간 (초) |
 | current_A | KSS Measurements | 전류 (A) |
 | voltage_V | KSS Measurements | 전압 (V) |
-| temp_C | TEMP_DATA | 온도 (°C) |
+| temp_C | TEMP | 온도 (°C) |
 
 ---
 
@@ -601,7 +601,7 @@ cell_no = DEVICE_OFFSET[device_no] + channel_no  # channel_no: 1-based
 │   ├── 20260112..._1_MY594702xx.kss
 │   ├── 20260112..._2_MY594702xx.kss
 │   ├── ...            (KSS 파일 1~5개, 있는 것만)
-│   └── 20260112..._TEMP_DATA.xlsx
+│   └── 20260112..._TEMP.xlsx        ← (구버전: _TEMP_DATA.xlsx)
 ├── CFDD000002/        ← 트레이 2
 │   └── ...
 └── ...
@@ -649,7 +649,7 @@ valid_cells = [c for d in present_devices for c in DEVICE_CELL_RANGE[d]]
 ```
 1. 폴더 스캔
    ├─ KSS 파일 목록 및 설비번호 자동 감지 (1~5개)
-   └─ TEMP_DATA 파일 존재 여부 확인
+   └─ TEMP 파일 존재 여부 확인 (*TEMP_DATA* → *TEMP* 순서로 탐색)
 
 2. KSS 파일 파싱 (감지된 파일만)
    ├─ 파일명에서 설비번호 추출
@@ -657,7 +657,7 @@ valid_cells = [c for d in present_devices for c in DEVICE_CELL_RANGE[d]]
    ├─ [Cat TestSetupPerChan] → 채널별 Rwiring (IsChanEnabled=TRUE만)
    └─ [Cat Measurements] → 시간별 I, V 배열
 
-3. TEMP_DATA 파싱
+3. TEMP 파싱 (구: TEMP_DATA)
    └─ 시간별 T(01)~T(144) 배열 (없으면 온도 컬럼 NaN)
 
 4. 셀 번호 매핑
