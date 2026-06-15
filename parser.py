@@ -291,8 +291,8 @@ def parse_tray_folder(folder_path: str, n_minutes: int = 15) -> tuple[pd.DataFra
         if dev is not None:
             device_kss[dev] = str(f)
 
-    # ── TEMP_DATA 파일 탐색 ──
-    temp_files = list(folder.glob('*TEMP_DATA*'))
+    # ── TEMP 파일 탐색 (구: *TEMP_DATA*, 신: *TEMP*) ──
+    temp_files = list(folder.glob('*TEMP_DATA*')) or list(folder.glob('*TEMP*'))
     temp_df = parse_temp_data(str(temp_files[0])) if temp_files else pd.DataFrame()
 
     meta_rows: list[dict] = []
