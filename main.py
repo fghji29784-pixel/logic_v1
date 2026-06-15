@@ -212,7 +212,7 @@ class Tab1Load(QWidget):
         subdirs = [d for d in sorted(p.iterdir()) if d.is_dir()]
         for d in subdirs:
             has_kss  = any(d.glob('*.kss')) or any(d.glob('*.KSS'))
-            has_temp = any(d.glob('*TEMP_DATA*'))
+            has_temp = any(d.glob('*TEMP_DATA*')) or any(d.glob('*TEMP*'))
             if has_kss:
                 item = QListWidgetItem(f'{d.name}{"  [온도O]" if has_temp else "  [온도X]"}')
                 item.setData(Qt.UserRole, str(d))
@@ -614,6 +614,8 @@ class Tab3Heatmap(QWidget):
 
         self.btn_draw = QPushButton('그리기')
         ctrl.addWidget(self.btn_draw)
+        self.btn_save_all = QPushButton('전체 저장 (PNG)')
+        ctrl.addWidget(self.btn_save_all)
         ctrl.addStretch()
         layout.addLayout(ctrl)
 
@@ -621,6 +623,7 @@ class Tab3Heatmap(QWidget):
         layout.addWidget(self.canvas)
 
         self.btn_draw.clicked.connect(self._draw)
+        self.btn_save_all.clicked.connect(self._save_all)
 
     def _refresh(self):
         self.cb_tray.clear()
@@ -653,7 +656,10 @@ class Tab3Heatmap(QWidget):
         kind = self.cb_type.currentIndex()
         if not tray or self.state.df_meta.empty:
             return
+        self._draw_core(self.canvas.fig, tray, kind)
+        self.canvas.draw()
 
+    def _draw_core(self, fig, tray: str, kind: int):
         n   = self.state.n_minutes
         col_map = {
             0: (f'i_{n}min', f'SDM 전류 (µA)',  lambda v: v * 1e6),
@@ -664,8 +670,8 @@ class Tab3Heatmap(QWidget):
         }
         col, title, transform = col_map[kind]
 
-        self.canvas.fig.clear()
-        ax = self.canvas.fig.add_subplot(111)
+        fig.clear()
+        ax = fig.add_subplot(111)
 
         row_labels = [chr(ord('A') + i) for i in range(TRAY_COLS)]
         col_labels  = list(range(1, TRAY_ROWS + 1))
@@ -699,7 +705,7 @@ class Tab3Heatmap(QWidget):
                 if len(flat) > 0:
                     vmax_val = np.percentile(flat, self.spin_clip.value())
             im = ax.imshow(grid, cmap='RdYlGn_r', aspect='equal', vmax=vmax_val)
-            self.canvas.fig.colorbar(im, ax=ax)
+            fig.colorbar(im, ax=ax)
             clip_note = (f'  (상위 {self.spin_clip.value()}% 클리핑)'
                          if self.chk_clip.isChecked() else '')
             ax.set_title(f'{tray} — {title}{clip_note}')
@@ -723,8 +729,27 @@ class Tab3Heatmap(QWidget):
         ax.set_yticklabels(col_labels, fontsize=8)
         ax.set_xlabel('행 (A–L)', fontsize=9)
         ax.set_ylabel('열 (1–12)', fontsize=9)
-        self.canvas.fig.tight_layout()
-        self.canvas.draw()
+        fig.tight_layout()
+
+    def _save_all(self):
+        if self.state.df_meta.empty:
+            QMessageBox.warning(self, '경고', '데이터를 먼저 불러오세요.')
+            return
+        folder = QFileDialog.getExistingDirectory(self, '전체 히트맵 저장 폴더 선택')
+        if not folder:
+            return
+        import matplotlib.pyplot as plt
+        trays = self.state.df_meta['tray_id'].unique().tolist()
+        kind_names = ['SDM전류', '온도', 'Rwiring', 'dOCV', '판정등급']
+        count = 0
+        for tray in trays:
+            for kind, name in enumerate(kind_names):
+                fig = plt.figure(figsize=(8, 7))
+                self._draw_core(fig, tray, kind)
+                fig.savefig(f'{folder}/{tray}_{name}.png', dpi=150, bbox_inches='tight')
+                plt.close(fig)
+                count += 1
+        QMessageBox.information(self, '완료', f'{count}개 히트맵 저장 완료\n{folder}')
 
 
 # ══════════════════════════════════════════════
