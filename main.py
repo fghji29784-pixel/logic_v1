@@ -151,7 +151,7 @@ class Tab1Load(QWidget):
         h1.addWidget(self.lbl_folder, 1)
         fl.addLayout(h1)
 
-        fl.addWidget(QLabel('트레이 목록 (최대 4개 선택):'))
+        fl.addWidget(QLabel('트레이 목록 (복수 선택 가능):'))
         self.lst_trays = QListWidget()
         self.lst_trays.setSelectionMode(QAbstractItemView.MultiSelection)
         fl.addWidget(self.lst_trays)
@@ -232,10 +232,6 @@ class Tab1Load(QWidget):
         if not selected:
             QMessageBox.warning(self, '경고', '트레이를 1개 이상 선택하세요.')
             return
-        if len(selected) > 4:
-            QMessageBox.warning(self, '경고', '최대 4개 트레이까지 선택 가능합니다.')
-            return
-
         folder_paths = [item.data(Qt.UserRole) for item in selected]
         n = self.spin_n.value()
 
