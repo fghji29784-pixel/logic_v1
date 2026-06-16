@@ -1023,15 +1023,29 @@ class Tab4Analysis(QWidget):
             ar2 = getattr(model, 'rsquared_adj', float('nan'))
             self.lbl_r2.setText(f'R² : {r2:.4f}   Adj.R² : {ar2:.4f}')
 
-        # 보정값 분포
+        # 보정값 분포 (A/E 등급별 색 구분)
         corrected = res.get('corrected')
+        df_valid  = res.get('df_valid', pd.DataFrame())
         if corrected is not None:
             self.canvas.fig.clear()
             ax = self.canvas.fig.add_subplot(111)
-            ax.hist(corrected.dropna(), bins=40, edgecolor='white', alpha=0.7)
+            if PROCESS_COL_GRADE in df_valid.columns:
+                grades = df_valid[PROCESS_COL_GRADE].astype(str).str.strip().str.upper()
+                good_c = corrected[grades == 'A'].dropna()
+                bad_c  = corrected[grades == 'E'].dropna()
+                other  = corrected[~grades.isin(['A', 'E'])].dropna()
+                if not other.empty:
+                    ax.hist(other, bins=40, color='#888', alpha=0.5, edgecolor='white', label='미분류')
+                if not good_c.empty:
+                    ax.hist(good_c, bins=40, color='steelblue', alpha=0.6, edgecolor='white', label='양품(A)')
+                if not bad_c.empty:
+                    ax.hist(bad_c, bins=10, color='red', alpha=0.85, edgecolor='white', label='불량(E)')
+                ax.legend(fontsize=8)
+            else:
+                ax.hist(corrected.dropna(), bins=40, edgecolor='white', alpha=0.7)
             ax.set_xlabel('보정값 (µA)')
             ax.set_ylabel('빈도')
-            ax.set_title(f'옵션 {res["option"]} 보정값 분포')
+            ax.set_title(f'옵션 {res["option"]} 보정값 분포 (파랑=양품A, 빨강=불량E)')
             ax.grid(True, alpha=0.3)
             self.canvas.fig.tight_layout()
             self.canvas.draw()
@@ -1058,7 +1072,13 @@ class Tab5Result(QWidget):
 
         cl.addWidget(QLabel('옵션 선택:'))
         self.cb_opt = QComboBox()
-        self.cb_opt.addItems([f'옵션 {i}' for i in range(1, 6)])
+        self.cb_opt.addItems([
+            '옵션 1: OLS (SDM만)',
+            '옵션 2: OLS (SDM+공정)',
+            '옵션 3: Robust (SDM만)',
+            '옵션 4: Robust (SDM+공정)',
+            '옵션 5: Lasso+CV',
+        ])
         cl.addWidget(self.cb_opt)
 
         cl.addWidget(QLabel('기준선 (z-score):'))
@@ -1083,10 +1103,10 @@ class Tab5Result(QWidget):
         # TP/FP/FN/TN
         g_cm = QGroupBox('혼동행렬 (판정등급 있을 때만 표시)')
         gml  = QGridLayout(g_cm)
-        self.lbl_tp = QLabel('TP: —')
-        self.lbl_fp = QLabel('FP: —')
-        self.lbl_fn = QLabel('FN: —')
-        self.lbl_tn = QLabel('TN: —')
+        self.lbl_tp = QLabel('TP(정검출): —')
+        self.lbl_fp = QLabel('FP(과검출): —')
+        self.lbl_fn = QLabel('FN(미검출): —')
+        self.lbl_tn = QLabel('TN(정통과): —')
         self.lbl_tp.setToolTip('True Positive: 실제 불량(E)을 불량으로 올바르게 검출')
         self.lbl_fp.setToolTip('False Positive: 실제 양품(A)을 불량으로 잘못 판정 (과검출)')
         self.lbl_fn.setToolTip('False Negative: 실제 불량(E)을 양품으로 놓침 → 0이 목표')
@@ -1101,8 +1121,8 @@ class Tab5Result(QWidget):
         cl.addWidget(g_cm)
 
         # d_prime / AUC
-        self.lbl_dp  = QLabel("d' : —")
-        self.lbl_auc = QLabel('AUC: —')
+        self.lbl_dp  = QLabel("d'(분리도, ≥2 목표): —")
+        self.lbl_auc = QLabel('AUC(판별력, ≥0.9 목표): —')
         self.lbl_dp.setToolTip("분리도. 불량 셀이 양품 분포에서 몇 σ 떨어져 있는지.\n2 이상이면 실용 가능, 높을수록 판별이 쉬움.")
         self.lbl_auc.setToolTip('ROC 곡선 면적. 기준선 위치와 무관한 전체 판별력.\n0.9 이상 목표. 1.0이면 완벽한 분리.')
         cl.addWidget(self.lbl_dp)
@@ -1169,7 +1189,23 @@ class Tab5Result(QWidget):
         # ── (0,1) dOCV vs 보정값 산점도 ──
         ax = axes[0, 1]
         if corrected is not None and docv_vals is not None:
-            ax.scatter(docv_vals, corrected, alpha=0.4, s=10, color='steelblue')
+            if true_labels is not None:
+                grade_s = true_labels.astype(str).str.strip().str.upper()
+                mask_ga = (grade_s == 'A')
+                mask_ge = (grade_s == 'E')
+                mask_gu = ~(mask_ga | mask_ge)
+                if mask_gu.any():
+                    ax.scatter(docv_vals[mask_gu], corrected[mask_gu],
+                               alpha=0.3, s=8, color='#888', label='미분류')
+                if mask_ga.any():
+                    ax.scatter(docv_vals[mask_ga], corrected[mask_ga],
+                               alpha=0.4, s=8, color='steelblue', label='양품(A)')
+                if mask_ge.any():
+                    ax.scatter(docv_vals[mask_ge], corrected[mask_ge],
+                               alpha=0.9, s=14, color='red', label='불량(E)', zorder=3)
+                ax.legend(fontsize=8)
+            else:
+                ax.scatter(docv_vals, corrected, alpha=0.4, s=10, color='steelblue')
             ax.set_xlabel('dOCV #07')
             ax.set_ylabel('SDM 보정값 (µA)')
             ax.set_title('dOCV vs SDM 보정값\n(우상향 직선에 가까울수록 SDM이 기존 방법을 잘 대체)')
