@@ -774,26 +774,38 @@ class Tab4Analysis(QWidget):
         g_opt = QGroupBox('모델 옵션')
         ol = QVBoxLayout(g_opt)
         self.opt_group = QButtonGroup(self)
-        labels = [
-            ('옵션 1: OLS (SDM만)',            1),
-            ('옵션 2: OLS (SDM+공정)',          2),
-            ('옵션 3: Robust (SDM만)',          3),
-            ('옵션 4: Robust (SDM+공정)',       4),
-            ('옵션 5: Lasso + LOO-tray CV',    5),
+        opt_info = [
+            ('옵션 1: OLS (SDM만)',         1,
+             'OLS 선형회귀. SDM 변수(초기전압·온도·위치)만으로 전류값 보정.\n가장 단순한 기준선 모델.'),
+            ('옵션 2: OLS (SDM+공정)',       2,
+             'OLS 선형회귀 + 공정 OCV·충전전압 추가.\n공정 데이터가 보정에 도움이 되는지 확인할 때 사용.'),
+            ('옵션 3: Robust (SDM만)',       3,
+             'Robust 회귀. 잔차 상·하위 10% 셀을 제거 후 재추정(WLS).\n불량셀이 회귀계수를 왜곡하지 않도록 방어. SDM 변수만 사용.'),
+            ('옵션 4: Robust (SDM+공정)',    4,
+             'Robust 회귀 + 공정 변수.\n옵션 3의 이상치 내성에 공정 데이터까지 추가.'),
+            ('옵션 5: Lasso + LOO-tray CV', 5,
+             'Lasso 회귀 + 트레이 단위 교차검증(LOO-tray CV).\n불필요한 공정 변수를 자동으로 0으로 줄임.\n다중공선성·과적합을 동시에 방어.'),
         ]
-        for txt, val in labels:
+        for txt, val, tip in opt_info:
             rb = QRadioButton(txt)
+            rb.setToolTip(tip)
             if val == 1:
                 rb.setChecked(True)
             self.opt_group.addButton(rb, val)
             ol.addWidget(rb)
+        _lbl = QLabel("※ 마우스를 올리면 옵션 설명 표시\n   옵션 1~5 전부 실행 후 d' 비교 권장")
+        _lbl.setWordWrap(True)
+        _lbl.setStyleSheet('color:#777; font-size:10px;')
+        ol.addWidget(_lbl)
         cl.addWidget(g_opt)
 
         # 종속변수
         g_dep = QGroupBox('종속변수')
         dl = QVBoxLayout(g_dep)
         self.rb_single = QRadioButton('단일값 (v1)')
+        self.rb_single.setToolTip('N분 시점의 전류값 한 개를 종속변수로 사용.\n구현이 단순하고 직관적.')
         self.rb_slope  = QRadioButton('기울기 slope (v2)')
+        self.rb_slope.setToolTip('0~N분 구간 전류 기울기(ΔI/Δt)를 종속변수로 사용.\n순간 노이즈에 덜 민감하여 더 안정적.')
         self.rb_single.setChecked(True)
         dl.addWidget(self.rb_single)
         dl.addWidget(self.rb_slope)
@@ -801,11 +813,13 @@ class Tab4Analysis(QWidget):
 
         # Rwiring 임계값
         g_rw = QGroupBox('Rwiring 임계값 (0 = 미적용)')
+        g_rw.setToolTip('배선·접촉 저항(Ω). 이 값 초과 채널은 접촉 불량으로 판단해 분석에서 제외.\n0이면 모든 채널 포함.')
         rl = QHBoxLayout(g_rw)
         self.spin_rw = QDoubleSpinBox()
         self.spin_rw.setRange(0, 100)
         self.spin_rw.setValue(0)
         self.spin_rw.setSuffix(' Ω')
+        self.spin_rw.setToolTip('히트맵(Rwiring)에서 이상치로 보이는 채널 값을 기준으로 설정.')
         rl.addWidget(self.spin_rw)
         cl.addWidget(g_rw)
 
@@ -813,38 +827,48 @@ class Tab4Analysis(QWidget):
         g_vars = QGroupBox('보정 변수 선택')
         vl = QVBoxLayout(g_vars)
 
-        vl.addWidget(QLabel('SDM 계열:'))
+        vl.addWidget(QLabel('SDM 계열 (기본 체크):'))
         sdm_grid = QGridLayout()
         self.var_checks = {}
         sdm_items = [
-            ('v_init',    'v_init (초기전압)'),
-            ('t_final',   't_final (최종온도)'),
-            ('delta_t',   'ΔT (온도변화)'),
-            ('layer_pos', '레이어위치 (L2~L6)'),
+            ('v_init',    'v_init (초기전압)',
+             '측정 시작 전압(mV). SOC 차이로 인한 전류 편차를 보정.'),
+            ('t_final',   't_final (최종온도)',
+             '측정 종료 온도(℃). 온도가 높을수록 자가방전 전류가 커지므로 보정 필수.'),
+            ('delta_t',   'ΔT (온도변화)',
+             '측정 중 온도 변화량(℃). 측정 도중 온도 드리프트를 보정.'),
+            ('layer_pos', '레이어위치 (L2~L6)',
+             '트레이 내 위치 더미변수. 가장자리(L1) 기준, 중앙(L6)으로 갈수록 온도 높음.\n위치별 온도·저항 불균일 보정.'),
         ]
-        for idx, (key, label) in enumerate(sdm_items):
+        for idx, (key, label, tip) in enumerate(sdm_items):
             cb = QCheckBox(label)
-            cb.setChecked(True)   # SDM 계열 기본 체크
+            cb.setToolTip(tip)
+            cb.setChecked(True)
             self.var_checks[key] = cb
             sdm_grid.addWidget(cb, idx // 2, idx % 2)
         vl.addLayout(sdm_grid)
 
-        vl.addWidget(QLabel('공정 계열:'))
+        vl.addWidget(QLabel('공정 계열 (옵션 2/4/5에서 사용):'))
         proc_grid = QGridLayout()
         proc_items = [
-            ('OCV1',         'OCV1'),
-            ('OCV2',         'OCV2'),
-            ('OCV3',         'OCV3'),
-            ('OCV4',         'OCV4'),
-            ('OCV7',         'OCV7'),
-            ('CHARGE_END_V', '1차충전종료전압'),
+            ('OCV1',         'OCV1',         '에이징 1단계 OCV. 초기 셀 상태 반영.'),
+            ('OCV2',         'OCV2',         '에이징 2단계 OCV.'),
+            ('OCV3',         'OCV3',         '에이징 3단계 OCV.'),
+            ('OCV4',         'OCV4',         '에이징 4단계 OCV.'),
+            ('OCV7',         'OCV7',         '에이징 7단계 OCV. dOCV 계산 기준점.'),
+            ('CHARGE_END_V', '1차충전종료전압', '1차 충전 종료 전압. 초기 셀 용량 차이 보정.'),
         ]
-        for idx, (key, label) in enumerate(proc_items):
+        for idx, (key, label, tip) in enumerate(proc_items):
             cb = QCheckBox(label)
-            cb.setChecked(False)  # 공정 계열 기본 미체크
+            cb.setToolTip(tip)
+            cb.setChecked(False)
             self.var_checks[key] = cb
             proc_grid.addWidget(cb, idx // 2, idx % 2)
         vl.addLayout(proc_grid)
+        _lbl2 = QLabel('※ VIF > 10 경고 시 해당 변수 해제\n   또는 옵션 5(Lasso) 사용 권장')
+        _lbl2.setWordWrap(True)
+        _lbl2.setStyleSheet('color:#777; font-size:10px;')
+        vl.addWidget(_lbl2)
         cl.addWidget(g_vars)
 
         # 실행 버튼
@@ -864,6 +888,12 @@ class Tab4Analysis(QWidget):
 
         # 회귀계수 테이블
         rl2.addWidget(QLabel('회귀계수 및 VIF:'))
+        _d1 = QLabel('계수: 해당 변수가 전류값에 미치는 영향크기  |  '
+                     'p-value < 0.05: 통계적으로 유의미  |  '
+                     'VIF > 10(빨강): 다중공선성 → 해당 변수 해제 또는 옵션5 사용')
+        _d1.setWordWrap(True)
+        _d1.setStyleSheet('color:#777; font-size:10px;')
+        rl2.addWidget(_d1)
         self.tbl_coef = QTableWidget(0, 4)
         self.tbl_coef.setHorizontalHeaderLabels(['변수', '계수', 'p-value', 'VIF'])
         self.tbl_coef.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
@@ -872,18 +902,31 @@ class Tab4Analysis(QWidget):
 
         # R² 라벨
         self.lbl_r2 = QLabel('R² : —   Adj.R² : —')
+        self.lbl_r2.setToolTip(
+            'R²: 독립변수들이 전류값 분산을 설명하는 비율 (0~1). 높을수록 보정 잘 됨.\n'
+            'Adj.R²: 변수 수 패널티 포함. 변수 추가 후에도 올라가야 의미 있음.')
         rl2.addWidget(self.lbl_r2)
 
         # 옵션별 분리도 비교
         rl2.addWidget(QLabel('옵션별 분리도 비교:'))
+        _d2 = QLabel("d'(분리도): 불량·양품 분포 간 거리(σ 단위). 2 이상이면 실용 가능, 높을수록 좋음.  |  "
+                     "AUC: 기준선 위치와 무관한 전체 판별력. 1에 가까울수록 좋음(0.9 이상 목표).")
+        _d2.setWordWrap(True)
+        _d2.setStyleSheet('color:#777; font-size:10px;')
+        rl2.addWidget(_d2)
         self.tbl_sep = QTableWidget(5, 3)
-        self.tbl_sep.setHorizontalHeaderLabels(['옵션', 'd_prime', 'AUC'])
+        self.tbl_sep.setHorizontalHeaderLabels(['옵션', "d'", 'AUC'])
         self.tbl_sep.setFixedHeight(140)
         for i in range(5):
             self.tbl_sep.setItem(i, 0, QTableWidgetItem(f'옵션 {i+1}'))
         rl2.addWidget(self.tbl_sep)
 
-        # 잔차/보정 분포 그래프
+        # 보정값 분포 그래프
+        _d3 = QLabel('보정값 분포: 외부 요인(온도·전압·위치) 제거 후 남은 순수 자가방전 편차 분포.\n'
+                     '양품 셀이 좁게 모이고 불량 셀이 오른쪽 꼬리에 분리될수록 판정에 유리.')
+        _d3.setWordWrap(True)
+        _d3.setStyleSheet('color:#777; font-size:10px;')
+        rl2.addWidget(_d3)
         self.canvas = PlotCanvas(figsize=(8, 3))
         rl2.addWidget(self.canvas)
 
@@ -1019,33 +1062,55 @@ class Tab5Result(QWidget):
         cl.addWidget(self.cb_opt)
 
         cl.addWidget(QLabel('기준선 (z-score):'))
+        _d_z = QLabel('보정값을 표준화한 점수.\n이 값 이상인 셀을 불량으로 판정.\n올릴수록 FP↓ FN↑, 내릴수록 FP↑ FN↓')
+        _d_z.setWordWrap(True)
+        _d_z.setStyleSheet('color:#777; font-size:10px;')
+        cl.addWidget(_d_z)
         self.spin_thresh = QDoubleSpinBox()
         self.spin_thresh.setRange(-10, 20)
         self.spin_thresh.setValue(2.0)
         self.spin_thresh.setSingleStep(0.1)
+        self.spin_thresh.setToolTip(
+            'z-score 기준선. 이 값 이상인 셀 → 불량 판정.\n'
+            '오른쪽으로 높일수록: FP 감소(과검출 줄어듦), FN 증가(불량 놓칠 위험).\n'
+            '왼쪽으로 낮출수록: FP 증가, FN 감소.\n'
+            '일반적으로 FN=0(불량 전량 검출) 유지하면서 FP를 최소화하는 값을 선택.')
         cl.addWidget(self.spin_thresh)
 
         self.btn_draw = QPushButton('그래프 갱신')
         cl.addWidget(self.btn_draw)
 
         # TP/FP/FN/TN
-        g_cm = QGroupBox('혼동행렬')
+        g_cm = QGroupBox('혼동행렬 (판정등급 있을 때만 표시)')
         gml  = QGridLayout(g_cm)
         self.lbl_tp = QLabel('TP: —')
         self.lbl_fp = QLabel('FP: —')
         self.lbl_fn = QLabel('FN: —')
         self.lbl_tn = QLabel('TN: —')
+        self.lbl_tp.setToolTip('True Positive: 실제 불량(E)을 불량으로 올바르게 검출')
+        self.lbl_fp.setToolTip('False Positive: 실제 양품(A)을 불량으로 잘못 판정 (과검출)')
+        self.lbl_fn.setToolTip('False Negative: 실제 불량(E)을 양품으로 놓침 → 0이 목표')
+        self.lbl_tn.setToolTip('True Negative: 실제 양품(A)을 양품으로 올바르게 통과')
         gml.addWidget(self.lbl_tp, 0, 0)
         gml.addWidget(self.lbl_fp, 0, 1)
         gml.addWidget(self.lbl_fn, 1, 0)
         gml.addWidget(self.lbl_tn, 1, 1)
+        _d_cm = QLabel('목표: FN=0 유지하면서 FP 최소화')
+        _d_cm.setStyleSheet('color:#777; font-size:10px;')
+        gml.addWidget(_d_cm, 2, 0, 1, 2)
         cl.addWidget(g_cm)
 
         # d_prime / AUC
         self.lbl_dp  = QLabel("d' : —")
         self.lbl_auc = QLabel('AUC: —')
+        self.lbl_dp.setToolTip("분리도. 불량 셀이 양품 분포에서 몇 σ 떨어져 있는지.\n2 이상이면 실용 가능, 높을수록 판별이 쉬움.")
+        self.lbl_auc.setToolTip('ROC 곡선 면적. 기준선 위치와 무관한 전체 판별력.\n0.9 이상 목표. 1.0이면 완벽한 분리.')
         cl.addWidget(self.lbl_dp)
         cl.addWidget(self.lbl_auc)
+        _d_dp = QLabel("d' ≥ 2, AUC ≥ 0.9 를 목표로 옵션·변수 조합 조정")
+        _d_dp.setWordWrap(True)
+        _d_dp.setStyleSheet('color:#777; font-size:10px;')
+        cl.addWidget(_d_dp)
 
         cl.addStretch()
         layout.addWidget(ctrl)
@@ -1097,7 +1162,7 @@ class Tab5Result(QWidget):
             ax.axvline(threshold, color='blue', linestyle='--', label=f'기준선 {threshold}')
             ax.set_xlabel('z-score')
             ax.set_ylabel('빈도')
-            ax.set_title('보정값 z-score 분포')
+            ax.set_title('보정값 z-score 분포\n(검=양품A, 빨=불량E, 파선=기준선 → 기준선 우측=불량 판정)')
             ax.legend(fontsize=8)
             ax.grid(True, alpha=0.3)
 
@@ -1107,7 +1172,7 @@ class Tab5Result(QWidget):
             ax.scatter(docv_vals, corrected, alpha=0.4, s=10, color='steelblue')
             ax.set_xlabel('dOCV #07')
             ax.set_ylabel('SDM 보정값 (µA)')
-            ax.set_title('dOCV vs SDM 보정값')
+            ax.set_title('dOCV vs SDM 보정값\n(우상향 직선에 가까울수록 SDM이 기존 방법을 잘 대체)')
             ax.grid(True, alpha=0.3)
 
         # ── (1,0) 분리도 N분 커브 ──
@@ -1124,7 +1189,7 @@ class Tab5Result(QWidget):
             ax.axhline(2.0, color='red', linestyle='--', alpha=0.5, label="d'=2")
             ax.set_xlabel('N (분)')
             ax.set_ylabel("d'")
-            ax.set_title('분리도 vs 측정 시간')
+            ax.set_title("분리도 vs 측정 시간\n(d'=2 점선 최초 돌파 지점 = 실용 최단 판정 시간)")
             ax.legend(fontsize=8)
             ax.grid(True, alpha=0.3)
         except Exception:
@@ -1145,7 +1210,7 @@ class Tab5Result(QWidget):
             colors[opt - 1] = 'orange'
             ax.bar(opts, dps, color=colors)
             ax.set_ylabel("d'")
-            ax.set_title('옵션별 분리도 비교')
+            ax.set_title("옵션별 분리도 비교\n(주황=현재 선택, 높을수록 불량 판별력 우수)")
             ax.grid(True, alpha=0.3, axis='y')
 
         self.canvas.fig.tight_layout()
