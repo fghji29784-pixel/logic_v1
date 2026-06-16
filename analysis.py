@@ -340,7 +340,8 @@ def separation_curve(df_meta: pd.DataFrame,
                      n_range: range | None = None,
                      rwiring_threshold: float | None = None,
                      ref: dict | None = None,
-                     feature_list: list[str] | None = None) -> pd.DataFrame:
+                     feature_list: list[str] | None = None,
+                     per_tray: bool = True) -> pd.DataFrame:
     """
     N분을 5~15 구간에서 바꿔가며 d_prime 계산 → 최단 판정 시간 탐색용.
     반환: DataFrame [n_minutes, d_prime]
@@ -351,11 +352,18 @@ def separation_curve(df_meta: pd.DataFrame,
     records = []
     for n in n_range:
         try:
-            res = run_analysis(df_meta, option=option, n_minutes=n,
-                               dep_type=dep_type,
-                               rwiring_threshold=rwiring_threshold,
-                               ref_conditions=ref,
-                               feature_list=feature_list)
+            if per_tray:
+                res = run_analysis_per_tray(df_meta, option=option, n_minutes=n,
+                                             dep_type=dep_type,
+                                             rwiring_threshold=rwiring_threshold,
+                                             ref_conditions=ref,
+                                             feature_list=feature_list)
+            else:
+                res = run_analysis(df_meta, option=option, n_minutes=n,
+                                   dep_type=dep_type,
+                                   rwiring_threshold=rwiring_threshold,
+                                   ref_conditions=ref,
+                                   feature_list=feature_list)
             dp = res['metrics'].get('d_prime', np.nan)
         except Exception:
             dp = np.nan
@@ -468,5 +476,104 @@ def run_analysis(df_meta: pd.DataFrame,
     grade_col   = PROCESS_COL_GRADE
     true_labels = dfv[grade_col] if grade_col in dfv.columns else None
     out['metrics'] = compute_metrics(z_scores, true_labels)
+
+    return out
+
+
+# ══════════════════════════════════════════════
+#  트레이별 독립 회귀 분석
+# ══════════════════════════════════════════════
+
+def run_analysis_per_tray(df_meta: pd.DataFrame,
+                           option: int,
+                           n_minutes: int,
+                           dep_type: str = 'single',
+                           rwiring_threshold: float | None = None,
+                           ref_conditions: dict | None = None,
+                           feature_list: list[str] | None = None) -> dict:
+    """
+    트레이별 독립 회귀 분석.
+    각 트레이에 별도 모형을 적합하고, z-score를 트레이 내에서 표준화.
+    옵션 5 (Lasso LOO-tray CV)는 단일 트레이에 ≥2 트레이가 필요하므로
+    OLS(옵션 1)로 자동 대체.
+    tray_id 컬럼이 없으면 단일 전체 분석으로 폴백.
+    """
+    if 'tray_id' not in df_meta.columns or df_meta.empty:
+        return run_analysis(df_meta, option, n_minutes, dep_type,
+                            rwiring_threshold, ref_conditions, feature_list)
+
+    tray_ids = df_meta['tray_id'].unique()
+
+    # 단일 트레이에서 LOO-tray CV 불가 → OLS
+    run_option = 1 if option == 5 else option
+
+    per_tray_results: dict = {}
+    corrected_parts:   list = []
+    z_score_parts:     list = []
+    df_valid_parts:    list = []
+    normal_mask_parts: list = []
+
+    for tid in tray_ids:
+        tdf = df_meta[df_meta['tray_id'] == tid].copy()
+        if tdf.empty:
+            continue
+        try:
+            res_t = run_analysis(tdf, run_option, n_minutes, dep_type,
+                                  rwiring_threshold, ref_conditions, feature_list)
+            per_tray_results[tid] = res_t
+            corrected_parts.append(res_t['corrected'])
+            z_score_parts.append(res_t['z_scores'])
+            df_valid_parts.append(res_t['df_valid'])
+            if 'normal_mask' in res_t:
+                normal_mask_parts.append(res_t['normal_mask'])
+        except Exception:
+            continue
+
+    if not corrected_parts:
+        raise ValueError('모든 트레이 분석에 실패했습니다.')
+
+    corrected_all = pd.concat(corrected_parts)
+    z_scores_all  = pd.concat(z_score_parts)
+    df_valid_all  = pd.concat(df_valid_parts)
+
+    first_res = next(iter(per_tray_results.values()))
+
+    # 트레이별 VIF 평균
+    vif_frames = [r['vif'] for r in per_tray_results.values()
+                  if r.get('vif') is not None and isinstance(r['vif'], pd.DataFrame)]
+    if vif_frames:
+        vif_cat = pd.concat(vif_frames)
+        avg_vif = (vif_cat
+                   .groupby('feature', as_index=False)
+                   .agg({'VIF': 'mean', 'warn': 'any'}))
+    else:
+        avg_vif = None
+
+    # 전체 평가지표 (합산 z_scores 기준)
+    grade_col   = PROCESS_COL_GRADE
+    true_labels = df_valid_all[grade_col] if grade_col in df_valid_all.columns else None
+    agg_metrics = compute_metrics(z_scores_all, true_labels)
+
+    out = {
+        'option'            : option,
+        'n_minutes'         : n_minutes,
+        'dep_type'          : dep_type,
+        'feature_cols'      : first_res['feature_cols'],
+        'df_valid'          : df_valid_all,
+        'model'             : first_res.get('model'),
+        'vif'               : avg_vif,
+        'corrected'         : corrected_all,
+        'z_scores'          : z_scores_all,
+        'metrics'           : agg_metrics,
+        'per_tray'          : True,
+        'n_trays'           : len(per_tray_results),
+        'per_tray_results'  : per_tray_results,
+    }
+
+    if option == 5:
+        out['lasso_fallback'] = True
+
+    if normal_mask_parts:
+        out['normal_mask'] = pd.concat(normal_mask_parts)
 
     return out

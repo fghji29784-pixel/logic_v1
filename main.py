@@ -39,7 +39,7 @@ import seaborn as sns
 
 from parser   import parse_multiple_trays, get_layer
 from analysis import (
-    add_layer_dummies, run_analysis,
+    add_layer_dummies, run_analysis, run_analysis_per_tray,
     separation_curve, confusion_at_threshold, compute_metrics,
 )
 from constants import (
@@ -96,7 +96,7 @@ class AnalysisWorker(QThread):
 
     def run(self):
         try:
-            res = run_analysis(
+            res = run_analysis_per_tray(
                 self.state.df_meta,
                 option=self.option,
                 n_minutes=self.state.n_minutes,
@@ -1021,7 +1021,12 @@ class Tab4Analysis(QWidget):
 
             r2  = getattr(model, 'rsquared', float('nan'))
             ar2 = getattr(model, 'rsquared_adj', float('nan'))
-            self.lbl_r2.setText(f'R² : {r2:.4f}   Adj.R² : {ar2:.4f}')
+            per_note = ''
+            if res.get('per_tray'):
+                per_note = f'  [트레이별 독립 모형 ×{res.get("n_trays","?")}  계수=첫 트레이]'
+                if res.get('lasso_fallback'):
+                    per_note += '  ※옵션5→OLS 자동대체'
+            self.lbl_r2.setText(f'R² : {r2:.4f}   Adj.R² : {ar2:.4f}{per_note}')
 
         # 보정값 분포 (A/E 등급별 색 구분)
         corrected = res.get('corrected')
