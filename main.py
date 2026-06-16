@@ -757,8 +757,9 @@ class Tab4Analysis(QWidget):
 
     def __init__(self, state: AppState):
         super().__init__()
-        self.state   = state
+        self.state    = state
         self.workers: dict[int, AnalysisWorker] = {}
+        self._cur_res: dict | None = None
         self._build_ui()
         state.callbacks.append(self._refresh)
 
@@ -927,6 +928,16 @@ class Tab4Analysis(QWidget):
         _d3.setWordWrap(True)
         _d3.setStyleSheet('color:#777; font-size:10px;')
         rl2.addWidget(_d3)
+
+        tray_row = QHBoxLayout()
+        tray_row.addWidget(QLabel('트레이 선택:'))
+        self.cb_tray = QComboBox()
+        self.cb_tray.addItem('전체 (합산)')
+        self.cb_tray.setToolTip('전체: 전 트레이 합산 분포\n개별 트레이: 해당 트레이만의 분포 (트레이별 z-score 기준)')
+        tray_row.addWidget(self.cb_tray)
+        tray_row.addStretch()
+        rl2.addLayout(tray_row)
+
         self.canvas = PlotCanvas(figsize=(8, 3))
         rl2.addWidget(self.canvas)
 
@@ -935,6 +946,7 @@ class Tab4Analysis(QWidget):
         # 시그널
         self.btn_run_one.clicked.connect(self._run_one)
         self.btn_run_all.clicked.connect(self._run_all)
+        self.cb_tray.currentIndexChanged.connect(self._draw_histogram)
 
     def _refresh(self):
         self.tbl_coef.setRowCount(0)
@@ -1028,32 +1040,61 @@ class Tab4Analysis(QWidget):
                     per_note += '  ※옵션5→OLS 자동대체'
             self.lbl_r2.setText(f'R² : {r2:.4f}   Adj.R² : {ar2:.4f}{per_note}')
 
-        # 보정값 분포 (A/E 등급별 색 구분)
-        corrected = res.get('corrected')
-        df_valid  = res.get('df_valid', pd.DataFrame())
-        if corrected is not None:
-            self.canvas.fig.clear()
-            ax = self.canvas.fig.add_subplot(111)
-            if PROCESS_COL_GRADE in df_valid.columns:
-                grades = df_valid[PROCESS_COL_GRADE].astype(str).str.strip().str.upper()
-                good_c = corrected[grades == 'A'].dropna()
-                bad_c  = corrected[grades == 'E'].dropna()
-                other  = corrected[~grades.isin(['A', 'E'])].dropna()
-                if not other.empty:
-                    ax.hist(other, bins=40, color='#888', alpha=0.5, edgecolor='white', label='미분류')
-                if not good_c.empty:
-                    ax.hist(good_c, bins=40, color='steelblue', alpha=0.6, edgecolor='white', label='양품(A)')
-                if not bad_c.empty:
-                    ax.hist(bad_c, bins=10, color='red', alpha=0.85, edgecolor='white', label='불량(E)')
-                ax.legend(fontsize=8)
-            else:
-                ax.hist(corrected.dropna(), bins=40, edgecolor='white', alpha=0.7)
-            ax.set_xlabel('보정값 (µA)')
-            ax.set_ylabel('빈도')
-            ax.set_title(f'옵션 {res["option"]} 보정값 분포 (파랑=양품A, 빨강=불량E)')
-            ax.grid(True, alpha=0.3)
-            self.canvas.fig.tight_layout()
-            self.canvas.draw()
+        # 트레이 선택 콤보박스 채우기 + 히스토그램 그리기
+        self._cur_res = res
+        self.cb_tray.blockSignals(True)
+        self.cb_tray.clear()
+        self.cb_tray.addItem('전체 (합산)')
+        if res.get('per_tray_results'):
+            for tid in res['per_tray_results']:
+                self.cb_tray.addItem(str(tid))
+        self.cb_tray.setCurrentIndex(0)
+        self.cb_tray.blockSignals(False)
+        self._draw_histogram()
+
+    def _draw_histogram(self):
+        res = self._cur_res
+        if res is None:
+            return
+
+        sel = self.cb_tray.currentText()
+        per_tray_res = res.get('per_tray_results', {})
+
+        if sel == '전체 (합산)' or sel not in per_tray_res:
+            corrected    = res.get('corrected')
+            df_valid     = res.get('df_valid', pd.DataFrame())
+            title_suffix = '전체'
+        else:
+            t_res        = per_tray_res[sel]
+            corrected    = t_res.get('corrected')
+            df_valid     = t_res.get('df_valid', pd.DataFrame())
+            title_suffix = sel
+
+        if corrected is None:
+            return
+
+        self.canvas.fig.clear()
+        ax = self.canvas.fig.add_subplot(111)
+        if PROCESS_COL_GRADE in df_valid.columns:
+            grades = df_valid[PROCESS_COL_GRADE].astype(str).str.strip().str.upper()
+            good_c = corrected[grades == 'A'].dropna()
+            bad_c  = corrected[grades == 'E'].dropna()
+            other  = corrected[~grades.isin(['A', 'E'])].dropna()
+            if not other.empty:
+                ax.hist(other, bins=40, color='#888', alpha=0.5, edgecolor='white', label='미분류')
+            if not good_c.empty:
+                ax.hist(good_c, bins=40, color='steelblue', alpha=0.6, edgecolor='white', label='양품(A)')
+            if not bad_c.empty:
+                ax.hist(bad_c, bins=10, color='red', alpha=0.85, edgecolor='white', label='불량(E)')
+            ax.legend(fontsize=8)
+        else:
+            ax.hist(corrected.dropna(), bins=40, edgecolor='white', alpha=0.7)
+        ax.set_xlabel('보정값 (µA)')
+        ax.set_ylabel('빈도')
+        ax.set_title(f'옵션 {res["option"]} 보정값 분포 [{title_suffix}] (파랑=양품A, 빨강=불량E)')
+        ax.grid(True, alpha=0.3)
+        self.canvas.fig.tight_layout()
+        self.canvas.draw()
 
 
 # ══════════════════════════════════════════════
