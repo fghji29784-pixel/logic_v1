@@ -281,7 +281,9 @@ def parse_tray_folder(folder_path: str, n_minutes: int = 15) -> tuple[pd.DataFra
     df_ts    — 셀×시간 시계열
     """
     folder = Path(folder_path)
-    tray_id = folder.name
+    _name = folder.name
+    _m = re.search(r'CFDD\S+', _name, re.IGNORECASE)
+    tray_id = _m.group(0).upper() if _m else re.sub(r'^\d+\.\s*', '', _name).strip() or _name
 
     # ── KSS 파일 탐색 ──
     kss_files = list(folder.glob('*.kss')) + list(folder.glob('*.KSS'))
