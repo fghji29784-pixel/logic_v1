@@ -331,48 +331,6 @@ def confusion_at_threshold(z_scores: pd.Series,
 
 
 # ══════════════════════════════════════════════
-#  분리도 N분 커브
-# ══════════════════════════════════════════════
-
-def separation_curve(df_meta: pd.DataFrame,
-                     option: int,
-                     dep_type: str = 'single',
-                     n_range: range | None = None,
-                     rwiring_threshold: float | None = None,
-                     ref: dict | None = None,
-                     feature_list: list[str] | None = None,
-                     per_tray: bool = True) -> pd.DataFrame:
-    """
-    N분을 5~15 구간에서 바꿔가며 d_prime 계산 → 최단 판정 시간 탐색용.
-    반환: DataFrame [n_minutes, d_prime]
-    """
-    if n_range is None:
-        n_range = range(5, 16)
-
-    records = []
-    for n in n_range:
-        try:
-            if per_tray:
-                res = run_analysis_per_tray(df_meta, option=option, n_minutes=n,
-                                             dep_type=dep_type,
-                                             rwiring_threshold=rwiring_threshold,
-                                             ref_conditions=ref,
-                                             feature_list=feature_list)
-            else:
-                res = run_analysis(df_meta, option=option, n_minutes=n,
-                                   dep_type=dep_type,
-                                   rwiring_threshold=rwiring_threshold,
-                                   ref_conditions=ref,
-                                   feature_list=feature_list)
-            dp = res['metrics'].get('d_prime', np.nan)
-        except Exception:
-            dp = np.nan
-        records.append({'n_minutes': n, 'd_prime': dp})
-
-    return pd.DataFrame(records)
-
-
-# ══════════════════════════════════════════════
 #  전체 파이프라인 (Steps 3~8)
 # ══════════════════════════════════════════════
 
@@ -577,3 +535,45 @@ def run_analysis_per_tray(df_meta: pd.DataFrame,
         out['normal_mask'] = pd.concat(normal_mask_parts)
 
     return out
+
+
+# ══════════════════════════════════════════════
+#  분리도 N분 커브
+# ══════════════════════════════════════════════
+
+def separation_curve(df_meta: pd.DataFrame,
+                     option: int,
+                     dep_type: str = 'single',
+                     n_range: range | None = None,
+                     rwiring_threshold: float | None = None,
+                     ref: dict | None = None,
+                     feature_list: list[str] | None = None,
+                     per_tray: bool = True) -> pd.DataFrame:
+    """
+    N분을 5~15 구간에서 바꿔가며 d_prime 계산 → 최단 판정 시간 탐색용.
+    반환: DataFrame [n_minutes, d_prime]
+    """
+    if n_range is None:
+        n_range = range(5, 16)
+
+    records = []
+    for n in n_range:
+        try:
+            if per_tray:
+                res = run_analysis_per_tray(df_meta, option=option, n_minutes=n,
+                                             dep_type=dep_type,
+                                             rwiring_threshold=rwiring_threshold,
+                                             ref_conditions=ref,
+                                             feature_list=feature_list)
+            else:
+                res = run_analysis(df_meta, option=option, n_minutes=n,
+                                   dep_type=dep_type,
+                                   rwiring_threshold=rwiring_threshold,
+                                   ref_conditions=ref,
+                                   feature_list=feature_list)
+            dp = res['metrics'].get('d_prime', np.nan)
+        except Exception:
+            dp = np.nan
+        records.append({'n_minutes': n, 'd_prime': dp})
+
+    return pd.DataFrame(records)

@@ -946,7 +946,7 @@ class Tab4Analysis(QWidget):
         # 시그널
         self.btn_run_one.clicked.connect(self._run_one)
         self.btn_run_all.clicked.connect(self._run_all)
-        self.cb_tray.currentIndexChanged.connect(self._draw_histogram)
+        self.cb_tray.currentIndexChanged.connect(self._update_tray_display)
 
     def _refresh(self):
         self.tbl_coef.setRowCount(0)
@@ -1007,72 +1007,75 @@ class Tab4Analysis(QWidget):
                              if isinstance(m.get('auc'), float) else '—'))
 
     def _display(self, res: dict):
-        model = res.get('model')
-        vif   = res.get('vif')
+        self._cur_res = res
+        # 트레이 목록 갱신 (선택 유지)
+        prev = self.cb_tray.currentText()
+        self.cb_tray.blockSignals(True)
+        self.cb_tray.clear()
+        self.cb_tray.addItem('전체 (합산)')
+        for tid in res.get('per_tray_results', {}):
+            self.cb_tray.addItem(str(tid))
+        idx = self.cb_tray.findText(prev)
+        self.cb_tray.setCurrentIndex(idx if idx >= 0 else 0)
+        self.cb_tray.blockSignals(False)
+        self._update_tray_display()
 
-        # 회귀계수 테이블
+    def _update_tray_display(self):
+        """트레이 선택에 따라 회귀계수 테이블 + 히스토그램 동시 갱신."""
+        res = self._cur_res
+        if res is None:
+            return
+
+        sel          = self.cb_tray.currentText()
+        per_tray_res = res.get('per_tray_results', {})
+
+        if sel == '전체 (합산)' or sel not in per_tray_res:
+            model        = res.get('model')
+            vif          = res.get('vif')   # 트레이별 평균 VIF
+            corrected    = res.get('corrected')
+            df_valid     = res.get('df_valid', pd.DataFrame())
+            title_suffix = '전체'
+            r2_note = ''
+            if res.get('per_tray'):
+                r2_note = f'  [트레이별 ×{res.get("n_trays","?")}  대표=첫 트레이]'
+                if res.get('lasso_fallback'):
+                    r2_note += '  ※옵션5→OLS'
+        else:
+            t_res        = per_tray_res[sel]
+            model        = t_res.get('model')
+            vif          = t_res.get('vif')
+            corrected    = t_res.get('corrected')
+            df_valid     = t_res.get('df_valid', pd.DataFrame())
+            title_suffix = sel
+            r2_note      = f'  [트레이: {sel}]'
+
+        # ── 회귀계수 테이블 ──
         self.tbl_coef.setRowCount(0)
         if model is not None and hasattr(model, 'params'):
-            params = model.params.drop('const', errors='ignore')
-            pvals  = model.pvalues.drop('const', errors='ignore')
+            params  = model.params.drop('const', errors='ignore')
+            pvals   = model.pvalues.drop('const', errors='ignore')
             vif_map = {}
             if vif is not None and isinstance(vif, pd.DataFrame):
                 vif_map = dict(zip(vif['feature'], vif['VIF']))
-
             for feat in params.index:
                 r = self.tbl_coef.rowCount()
                 self.tbl_coef.insertRow(r)
                 self.tbl_coef.setItem(r, 0, QTableWidgetItem(feat))
                 self.tbl_coef.setItem(r, 1, QTableWidgetItem(f'{params[feat]:.4f}'))
-                self.tbl_coef.setItem(r, 2, QTableWidgetItem(f'{pvals.get(feat, float("nan")):.4f}'))
-                vif_val = vif_map.get(feat, float('nan'))
+                self.tbl_coef.setItem(r, 2, QTableWidgetItem(
+                    f'{pvals.get(feat, float("nan")):.4f}'))
+                vif_val  = vif_map.get(feat, float('nan'))
                 item_vif = QTableWidgetItem(f'{vif_val:.1f}')
                 if vif_val > 10:
                     item_vif.setBackground(QColor(255, 200, 200))
                 self.tbl_coef.setItem(r, 3, item_vif)
-
             r2  = getattr(model, 'rsquared', float('nan'))
             ar2 = getattr(model, 'rsquared_adj', float('nan'))
-            per_note = ''
-            if res.get('per_tray'):
-                per_note = f'  [트레이별 독립 모형 ×{res.get("n_trays","?")}  계수=첫 트레이]'
-                if res.get('lasso_fallback'):
-                    per_note += '  ※옵션5→OLS 자동대체'
-            self.lbl_r2.setText(f'R² : {r2:.4f}   Adj.R² : {ar2:.4f}{per_note}')
+            self.lbl_r2.setText(f'R² : {r2:.4f}   Adj.R² : {ar2:.4f}{r2_note}')
 
-        # 트레이 선택 콤보박스 채우기 + 히스토그램 그리기
-        self._cur_res = res
-        self.cb_tray.blockSignals(True)
-        self.cb_tray.clear()
-        self.cb_tray.addItem('전체 (합산)')
-        if res.get('per_tray_results'):
-            for tid in res['per_tray_results']:
-                self.cb_tray.addItem(str(tid))
-        self.cb_tray.setCurrentIndex(0)
-        self.cb_tray.blockSignals(False)
-        self._draw_histogram()
-
-    def _draw_histogram(self):
-        res = self._cur_res
-        if res is None:
-            return
-
-        sel = self.cb_tray.currentText()
-        per_tray_res = res.get('per_tray_results', {})
-
-        if sel == '전체 (합산)' or sel not in per_tray_res:
-            corrected    = res.get('corrected')
-            df_valid     = res.get('df_valid', pd.DataFrame())
-            title_suffix = '전체'
-        else:
-            t_res        = per_tray_res[sel]
-            corrected    = t_res.get('corrected')
-            df_valid     = t_res.get('df_valid', pd.DataFrame())
-            title_suffix = sel
-
+        # ── 보정값 분포 히스토그램 ──
         if corrected is None:
             return
-
         self.canvas.fig.clear()
         ax = self.canvas.fig.add_subplot(111)
         if PROCESS_COL_GRADE in df_valid.columns:
@@ -1083,15 +1086,17 @@ class Tab4Analysis(QWidget):
             if not other.empty:
                 ax.hist(other, bins=40, color='#888', alpha=0.5, edgecolor='white', label='미분류')
             if not good_c.empty:
-                ax.hist(good_c, bins=40, color='steelblue', alpha=0.6, edgecolor='white', label='양품(A)')
+                ax.hist(good_c, bins=40, color='steelblue', alpha=0.6,
+                        edgecolor='white', label='양품(A)')
             if not bad_c.empty:
-                ax.hist(bad_c, bins=10, color='red', alpha=0.85, edgecolor='white', label='불량(E)')
+                ax.hist(bad_c, bins=10, color='red', alpha=0.85,
+                        edgecolor='white', label='불량(E)')
             ax.legend(fontsize=8)
         else:
             ax.hist(corrected.dropna(), bins=40, edgecolor='white', alpha=0.7)
         ax.set_xlabel('보정값 (µA)')
         ax.set_ylabel('빈도')
-        ax.set_title(f'옵션 {res["option"]} 보정값 분포 [{title_suffix}] (파랑=양품A, 빨강=불량E)')
+        ax.set_title(f'옵션 {res["option"]} 보정값 분포 [{title_suffix}]  (파랑=양품A  빨강=불량E)')
         ax.grid(True, alpha=0.3)
         self.canvas.fig.tight_layout()
         self.canvas.draw()
@@ -1126,6 +1131,14 @@ class Tab5Result(QWidget):
             '옵션 5: Lasso+CV',
         ])
         cl.addWidget(self.cb_opt)
+
+        cl.addWidget(QLabel('트레이 선택:'))
+        self.cb_tray = QComboBox()
+        self.cb_tray.addItem('전체 (합산)')
+        self.cb_tray.setToolTip(
+            '전체: 전 트레이 합산 기준 z-score/혼동행렬/분리도 커브\n'
+            '개별 트레이: 해당 트레이만의 트레이 내 상대 z-score 기준')
+        cl.addWidget(self.cb_tray)
 
         cl.addWidget(QLabel('기준선 (z-score):'))
         _d_z = QLabel('보정값을 표준화한 점수.\n이 값 이상인 셀을 불량으로 판정.\n올릴수록 FP↓ FN↑, 내릴수록 FP↑ FN↓')
@@ -1186,6 +1199,7 @@ class Tab5Result(QWidget):
         layout.addWidget(self.canvas)
 
         self.cb_opt.currentIndexChanged.connect(self._draw)
+        self.cb_tray.currentIndexChanged.connect(self._draw)
         # spin_thresh → state.threshold 동기화 + 그래프 갱신
         self.spin_thresh.valueChanged.connect(
             lambda v: (setattr(self.state, 'threshold', v), self._draw())
@@ -1201,11 +1215,43 @@ class Tab5Result(QWidget):
         if res is None:
             return
 
-        z_scores  = res.get('z_scores')
-        corrected = res.get('corrected')
-        df_valid  = res.get('df_valid', pd.DataFrame())
-        threshold = self.spin_thresh.value()
+        # ── 트레이 목록 갱신 (선택 유지) ──
+        prev_sel = self.cb_tray.currentText()
+        self.cb_tray.blockSignals(True)
+        self.cb_tray.clear()
+        self.cb_tray.addItem('전체 (합산)')
+        for tid in res.get('per_tray_results', {}):
+            self.cb_tray.addItem(str(tid))
+        idx = self.cb_tray.findText(prev_sel)
+        self.cb_tray.setCurrentIndex(idx if idx >= 0 else 0)
+        self.cb_tray.blockSignals(False)
 
+        sel          = self.cb_tray.currentText()
+        per_tray_res = res.get('per_tray_results', {})
+
+        # ── 트레이별 vs 전체 데이터 선택 ──
+        if sel != '전체 (합산)' and sel in per_tray_res:
+            t_res       = per_tray_res[sel]
+            z_scores    = t_res.get('z_scores')
+            corrected   = t_res.get('corrected')
+            df_valid    = t_res.get('df_valid', pd.DataFrame())
+            df_curve    = self.state.df_meta[
+                self.state.df_meta['tray_id'] == sel
+            ] if 'tray_id' in self.state.df_meta.columns else self.state.df_meta
+            sel_label   = sel
+            disp_metrics = compute_metrics(
+                z_scores,
+                df_valid[PROCESS_COL_GRADE] if PROCESS_COL_GRADE in df_valid.columns else None
+            )
+        else:
+            z_scores     = res.get('z_scores')
+            corrected    = res.get('corrected')
+            df_valid     = res.get('df_valid', pd.DataFrame())
+            df_curve     = self.state.df_meta
+            sel_label    = '전체'
+            disp_metrics = res.get('metrics', {})
+
+        threshold   = self.spin_thresh.value()
         grade_col   = PROCESS_COL_GRADE
         true_labels = df_valid[grade_col] if grade_col in df_valid.columns else None
         docv_col    = PROCESS_COL_DOCV
@@ -1218,7 +1264,6 @@ class Tab5Result(QWidget):
         # ── (0,0) z-score 분포 ──
         ax = axes[0, 0]
         if z_scores is not None:
-            # astype(str) 먼저 — NaN이 섞인 Series에서 .str.upper() 단독 사용 시 오류
             grade_str = true_labels.astype(str).str.upper() if true_labels is not None else None
             good_z = z_scores[grade_str == 'A'] if grade_str is not None else z_scores
             bad_z  = z_scores[grade_str == 'E'] if grade_str is not None else pd.Series(dtype=float)
@@ -1228,7 +1273,7 @@ class Tab5Result(QWidget):
             ax.axvline(threshold, color='blue', linestyle='--', label=f'기준선 {threshold}')
             ax.set_xlabel('z-score')
             ax.set_ylabel('빈도')
-            ax.set_title('보정값 z-score 분포\n(검=양품A, 빨=불량E, 파선=기준선 → 기준선 우측=불량 판정)')
+            ax.set_title(f'z-score 분포 [{sel_label}]\n(검=양품A, 빨=불량E, 파선=기준선)')
             ax.legend(fontsize=8)
             ax.grid(True, alpha=0.3)
 
@@ -1254,14 +1299,14 @@ class Tab5Result(QWidget):
                 ax.scatter(docv_vals, corrected, alpha=0.4, s=10, color='steelblue')
             ax.set_xlabel('dOCV #07')
             ax.set_ylabel('SDM 보정값 (µA)')
-            ax.set_title('dOCV vs SDM 보정값\n(우상향 직선에 가까울수록 SDM이 기존 방법을 잘 대체)')
+            ax.set_title(f'dOCV vs SDM 보정값 [{sel_label}]\n(우상향 직선에 가까울수록 SDM이 기존 방법 대체)')
             ax.grid(True, alpha=0.3)
 
-        # ── (1,0) 분리도 N분 커브 ──
+        # ── (1,0) 분리도 N분 커브 (선택 트레이 기준) ──
         ax = axes[1, 0]
         try:
             curve_df = separation_curve(
-                self.state.df_meta, option=opt,
+                df_curve, option=opt,
                 dep_type=self.state.dep_type,
                 n_range=range(5, 16),
                 rwiring_threshold=self.state.rwiring_threshold,
@@ -1271,13 +1316,13 @@ class Tab5Result(QWidget):
             ax.axhline(2.0, color='red', linestyle='--', alpha=0.5, label="d'=2")
             ax.set_xlabel('N (분)')
             ax.set_ylabel("d'")
-            ax.set_title("분리도 vs 측정 시간\n(d'=2 점선 최초 돌파 지점 = 실용 최단 판정 시간)")
+            ax.set_title(f"분리도 vs 측정 시간 [{sel_label}]\n(d'=2 최초 돌파 = 실용 최단 판정 시간)")
             ax.legend(fontsize=8)
             ax.grid(True, alpha=0.3)
         except Exception:
             ax.set_title('분리도 커브 계산 실패')
 
-        # ── (1,1) 옵션별 분리도 막대 ──
+        # ── (1,1) 옵션별 분리도 막대 (전체 기준 고정) ──
         ax = axes[1, 1]
         opts = []
         dps  = []
@@ -1292,13 +1337,13 @@ class Tab5Result(QWidget):
             colors[opt - 1] = 'orange'
             ax.bar(opts, dps, color=colors)
             ax.set_ylabel("d'")
-            ax.set_title("옵션별 분리도 비교\n(주황=현재 선택, 높을수록 불량 판별력 우수)")
+            ax.set_title("옵션별 분리도 비교 [전체]\n(주황=현재 선택, 높을수록 판별력 우수)")
             ax.grid(True, alpha=0.3, axis='y')
 
         self.canvas.fig.tight_layout()
         self.canvas.draw()
 
-        # 혼동행렬 업데이트
+        # ── 혼동행렬 / d' / AUC (선택 트레이 기준) ──
         if z_scores is not None and true_labels is not None:
             cm = confusion_at_threshold(z_scores, true_labels, threshold)
             self.lbl_tp.setText(f'TP: {cm["TP"]}')
@@ -1306,11 +1351,10 @@ class Tab5Result(QWidget):
             self.lbl_fn.setText(f'FN: {cm["FN"]}')
             self.lbl_tn.setText(f'TN: {cm["TN"]}')
 
-        m = res.get('metrics', {})
-        self.lbl_dp.setText(f"d' : {m.get('d_prime', '—'):.3f}"
-                            if isinstance(m.get('d_prime'), float) else "d' : —")
-        self.lbl_auc.setText(f"AUC: {m.get('auc', '—'):.3f}"
-                             if isinstance(m.get('auc'), float) else 'AUC: —')
+        self.lbl_dp.setText(f"d' : {disp_metrics.get('d_prime', '—'):.3f}"
+                            if isinstance(disp_metrics.get('d_prime'), float) else "d' : —")
+        self.lbl_auc.setText(f"AUC: {disp_metrics.get('auc', '—'):.3f}"
+                             if isinstance(disp_metrics.get('auc'), float) else 'AUC: —')
 
 
 # ══════════════════════════════════════════════
