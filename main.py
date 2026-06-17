@@ -41,6 +41,7 @@ from parser   import parse_multiple_trays, get_layer
 from analysis import (
     add_layer_dummies, run_analysis, run_analysis_per_tray,
     separation_curve, confusion_at_threshold, compute_metrics,
+    docv_surrogate_analysis,
 )
 from constants import (
     TOTAL_CELLS, TRAY_ROWS, TRAY_COLS, NUM_LAYERS,
@@ -1269,6 +1270,34 @@ class Tab5Result(QWidget):
         _d_dp.setStyleSheet('color:#777; font-size:10px;')
         cl.addWidget(_d_dp)
 
+        # dOCV 대체재 검증
+        g_sur = QGroupBox('dOCV 대체재 검증')
+        g_sur.setToolTip('SDM 보정값이 기존 dOCV 판정을 얼마나 재현하는지.\n'
+                         '불량 라벨이 거의 없어도 연속 dOCV 상관으로 매번 검증 가능.')
+        sl = QVBoxLayout(g_sur)
+        self.lbl_pear   = QLabel('Pearson r: —')
+        self.lbl_spear  = QLabel('Spearman r: —')
+        self.lbl_rnorm  = QLabel('양품만 r(P/S): —')
+        self.lbl_cut    = QLabel('SDM 컷오프: —')
+        self.lbl_agree  = QLabel('일치율(민감/특이): —')
+        self.lbl_rnorm.setToolTip(
+            '명백한 불량(dOCV E) 제외, 양품 범위 안에서의 상관.\n'
+            '높으면 → SDM이 dOCV 대체 가능(미세불량 선별 가능).\n'
+            '0에 가까우면 → SDM은 큰 단락만 잡는 검출기.')
+        self.lbl_cut.setToolTip(
+            'dOCV 규칙(트레이 median+0.8mV)에 대응하는 SDM 보정값 컷오프(µA).\n'
+            'SDM↔dOCV 회귀로 역산. OCV1 시점 선별 기준선 후보.')
+        self.lbl_agree.setToolTip(
+            'SDM 컷오프로 dOCV 규칙 라벨을 재현했을 때\n민감도(불량검출률)/특이도(양품통과율).')
+        for w in (self.lbl_pear, self.lbl_spear, self.lbl_rnorm,
+                  self.lbl_cut, self.lbl_agree):
+            sl.addWidget(w)
+        _d_sur = QLabel('양품만 r 이 핵심 — 대체재 여부 판가름')
+        _d_sur.setWordWrap(True)
+        _d_sur.setStyleSheet('color:#777; font-size:10px;')
+        sl.addWidget(_d_sur)
+        cl.addWidget(g_sur)
+
         cl.addStretch()
         layout.addWidget(ctrl)
 
@@ -1286,6 +1315,31 @@ class Tab5Result(QWidget):
 
     def _refresh(self):
         pass  # 분석 완료 후 Tab4에서 analysis_done 시그널로 연결
+
+    def _update_surrogate_labels(self, sur: dict | None):
+        if not sur:
+            for w, t in [(self.lbl_pear, 'Pearson r: —'),
+                         (self.lbl_spear, 'Spearman r: —'),
+                         (self.lbl_rnorm, '양품만 r(P/S): —'),
+                         (self.lbl_cut, 'SDM 컷오프: —'),
+                         (self.lbl_agree, '일치율(민감/특이): —')]:
+                w.setText(t)
+            return
+        def f(v, fmt='{:.3f}'):
+            return fmt.format(v) if isinstance(v, float) and not np.isnan(v) else '—'
+        self.lbl_pear.setText(f"Pearson r: {f(sur.get('pearson'))}")
+        self.lbl_spear.setText(f"Spearman r: {f(sur.get('spearman'))}")
+        self.lbl_rnorm.setText(
+            f"양품만 r(P/S): {f(sur.get('pearson_normal'))} / {f(sur.get('spearman_normal'))}")
+        self.lbl_cut.setText(
+            f"SDM 컷오프: {f(sur.get('sdm_cutoff'), '{:.2f}')} µA"
+            if 'sdm_cutoff' in sur else 'SDM 컷오프: —')
+        if 'sensitivity' in sur:
+            self.lbl_agree.setText(
+                f"일치율: 민감 {f(sur.get('sensitivity'))} / 특이 {f(sur.get('specificity'))} "
+                f"(dOCV E={sur.get('n_docv_E','?')})")
+        else:
+            self.lbl_agree.setText(f"일치율: — (dOCV E={sur.get('n_docv_E','?')})")
 
     def _draw(self):
         opt = self.cb_opt.currentIndex() + 1
@@ -1379,6 +1433,22 @@ class Tab5Result(QWidget):
             ax.set_ylabel('SDM 보정값 (µA)')
             ax.set_title(f'dOCV vs SDM 보정값 [{sel_label}]\n(우상향 직선에 가까울수록 SDM이 기존 방법 대체)')
             ax.grid(True, alpha=0.3)
+
+        # ── dOCV 대체재 검증 (상관·컷오프 역산) ──
+        sur = None
+        if corrected is not None and docv_vals is not None:
+            try:
+                sur = docv_surrogate_analysis(df_valid, corrected, docv_col)
+            except Exception:
+                sur = None
+        self._update_surrogate_labels(sur)
+        if sur and 'sdm_cutoff' in sur and corrected is not None:
+            # 중심(트레이 median) + 역산 컷오프 → 절대 SDM 값 (전체는 근사)
+            base_med = float(pd.to_numeric(corrected, errors='coerce').median())
+            y_cut = base_med + sur['sdm_cutoff']
+            axes[0, 1].axhline(y_cut, color='green', linestyle=':',
+                               alpha=0.8, label=f'SDM컷 {y_cut:.2f}')
+            axes[0, 1].legend(fontsize=7)
 
         # ── (1,0) 분리도 N분 커브 (선택 트레이 기준) ──
         ax = axes[1, 0]

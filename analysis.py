@@ -253,18 +253,21 @@ def correct_values(y: pd.Series,
 # ══════════════════════════════════════════════
 
 def standardize(corrected: pd.Series,
-                normal_mask: pd.Series | None = None) -> pd.Series:
+                normal_mask: pd.Series | None = None,
+                center: str = 'median') -> pd.Series:
     """
     Z-score 표준화.
     normal_mask: 정상 셀 집단 마스크 (불량 오염 방지)
+    center: 'median'(기본, 기존 dOCV mode+0.8mV 방식과 정렬, 치우침에 강건)
+            또는 'mean'.
     """
     if normal_mask is not None and normal_mask.any():
         base = corrected[normal_mask]
     else:
         base = corrected
-    mu    = base.mean()
+    loc   = base.median() if center == 'median' else base.mean()
     sigma = base.std(ddof=1)
-    return (corrected - mu) / (sigma + 1e-10)
+    return (corrected - loc) / (sigma + 1e-10)
 
 
 # ══════════════════════════════════════════════
@@ -328,6 +331,93 @@ def confusion_at_threshold(z_scores: pd.Series,
     fn = int(((p == 0) & (b == 1)).sum())
     tn = int(((p == 0) & (b == 0)).sum())
     return {'TP': tp, 'FP': fp, 'FN': fn, 'TN': tn}
+
+
+# ══════════════════════════════════════════════
+#  dOCV 대체재 검증 (SDM이 dOCV를 재현하는가)
+# ══════════════════════════════════════════════
+
+def docv_surrogate_analysis(df_valid: pd.DataFrame,
+                            corrected: pd.Series,
+                            docv_col: str,
+                            docv_offset: float = 0.8) -> dict | None:
+    """
+    SDM_corrected 가 dOCV(OCV1-OCV3)를 얼마나 잘 재현하는지 검증.
+
+    기존 E급 규칙: dOCV > (트레이 dOCV median + docv_offset[mV])
+    이를 SDM 공간으로 옮겨, 트레이별 median 중심으로 정렬한 뒤:
+      - Pearson / Spearman 상관 (전체 + 양품만)
+      - dOCV 컷오프(median+offset)에 대응하는 SDM 컷오프 역산 (회귀)
+      - 그 SDM 컷오프로 dOCV 규칙 라벨을 재현했을 때의 일치율(민감도/특이도)
+
+    반환 dict 또는 dOCV 없으면 None.
+    """
+    if docv_col not in df_valid.columns:
+        return None
+
+    docv = pd.to_numeric(df_valid[docv_col], errors='coerce')
+    sdm  = pd.to_numeric(corrected, errors='coerce')
+
+    # 트레이별 median 중심 정렬 (없으면 전체 median)
+    if 'tray_id' in df_valid.columns:
+        tray = df_valid['tray_id']
+        docv_c = docv - tray.map(docv.groupby(tray).median())
+        sdm_c  = sdm  - tray.map(sdm.groupby(tray).median())
+    else:
+        docv_c = docv - docv.median()
+        sdm_c  = sdm  - sdm.median()
+
+    m = docv_c.notna() & sdm_c.notna()
+    if m.sum() < 5:
+        return None
+    dc, sc = docv_c[m], sdm_c[m]
+
+    # dOCV 규칙 라벨 (트레이 median + offset 초과 → E)
+    docv_label = (dc > docv_offset)
+    normal     = ~docv_label
+
+    out: dict = {
+        'n'            : int(m.sum()),
+        'n_docv_E'     : int(docv_label.sum()),
+        'docv_offset'  : docv_offset,
+    }
+
+    # 상관계수 (numpy/pandas 만으로 — scipy 의존성 없음)
+    def _pearson(a: pd.Series, b: pd.Series) -> float:
+        if len(a) < 2 or a.nunique() < 2 or b.nunique() < 2:
+            return float('nan')
+        return float(np.corrcoef(a.values, b.values)[0, 1])
+
+    def _spearman(a: pd.Series, b: pd.Series) -> float:
+        # 순위 상관 = 순위에 대한 Pearson
+        return _pearson(a.rank(), b.rank())
+
+    out['pearson']  = _pearson(sc, dc)
+    out['spearman'] = _spearman(sc, dc)
+    if normal.sum() >= 5:
+        out['pearson_normal']  = _pearson(sc[normal], dc[normal])
+        out['spearman_normal'] = _spearman(sc[normal], dc[normal])
+    else:
+        out['pearson_normal'] = out['spearman_normal'] = float('nan')
+
+    # SDM 컷오프 역산: dOCV_centered ≈ γ·SDM_centered → SDM컷 = offset/γ
+    if sc.nunique() > 1:
+        gamma, _ = np.polyfit(sc, dc, 1)
+        out['gamma'] = float(gamma)
+        if abs(gamma) > 1e-12:
+            sdm_cut = docv_offset / gamma
+            out['sdm_cutoff'] = float(sdm_cut)
+            # 일치율: SDM 규칙 vs dOCV 규칙
+            pred = (sc > sdm_cut) if gamma > 0 else (sc < sdm_cut)
+            tp = int((pred & docv_label).sum())
+            fp = int((pred & normal).sum())
+            fn = int((~pred & docv_label).sum())
+            tn = int((~pred & normal).sum())
+            out.update({'TP': tp, 'FP': fp, 'FN': fn, 'TN': tn})
+            out['sensitivity'] = tp / (tp + fn) if (tp + fn) else float('nan')
+            out['specificity'] = tn / (tn + fp) if (tn + fp) else float('nan')
+
+    return out
 
 
 # ══════════════════════════════════════════════
