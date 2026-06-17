@@ -883,7 +883,7 @@ class Tab4Analysis(QWidget):
         cl.addStretch()
         layout.addWidget(ctrl)
 
-        # ── 오른쪽: 결과 출력 ──
+        # ── 오른쪽: 결과 출력 (스크롤) ──
         right = QWidget()
         rl2 = QVBoxLayout(right)
 
@@ -941,7 +941,21 @@ class Tab4Analysis(QWidget):
         self.canvas = PlotCanvas(figsize=(8, 3))
         rl2.addWidget(self.canvas)
 
-        layout.addWidget(right)
+        # 변수별 산점도
+        _d4 = QLabel('변수별 산점도: 각 독립변수 vs SDM 측정값(y, 보정 전). '
+                     '빨간 회귀선 기울기 = 그 변수의 단독 영향. '
+                     '점이 선을 따라 모일수록 그 변수가 SDM과 강한 상관 → 보정 효과 큼.\n'
+                     '(파랑=양품A, 빨강=불량E, 회색=미분류)')
+        _d4.setWordWrap(True)
+        _d4.setStyleSheet('color:#777; font-size:10px;')
+        rl2.addWidget(_d4)
+        self.canvas_scatter = PlotCanvas(figsize=(8, 4))
+        rl2.addWidget(self.canvas_scatter)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(right)
+        layout.addWidget(scroll)
 
         # 시그널
         self.btn_run_one.clicked.connect(self._run_one)
@@ -1074,32 +1088,96 @@ class Tab4Analysis(QWidget):
             self.lbl_r2.setText(f'R² : {r2:.4f}   Adj.R² : {ar2:.4f}{r2_note}')
 
         # ── 보정값 분포 히스토그램 ──
-        if corrected is None:
+        if corrected is not None:
+            self.canvas.fig.clear()
+            ax = self.canvas.fig.add_subplot(111)
+            if PROCESS_COL_GRADE in df_valid.columns:
+                grades = df_valid[PROCESS_COL_GRADE].astype(str).str.strip().str.upper()
+                good_c = corrected[grades == 'A'].dropna()
+                bad_c  = corrected[grades == 'E'].dropna()
+                other  = corrected[~grades.isin(['A', 'E'])].dropna()
+                if not other.empty:
+                    ax.hist(other, bins=40, color='#888', alpha=0.5, edgecolor='white', label='미분류')
+                if not good_c.empty:
+                    ax.hist(good_c, bins=40, color='steelblue', alpha=0.6,
+                            edgecolor='white', label='양품(A)')
+                if not bad_c.empty:
+                    ax.hist(bad_c, bins=10, color='red', alpha=0.85,
+                            edgecolor='white', label='불량(E)')
+                ax.legend(fontsize=8)
+            else:
+                ax.hist(corrected.dropna(), bins=40, edgecolor='white', alpha=0.7)
+            ax.set_xlabel('보정값 (µA)')
+            ax.set_ylabel('빈도')
+            ax.set_title(f'옵션 {res["option"]} 보정값 분포 [{title_suffix}]  (파랑=양품A  빨강=불량E)')
+            ax.grid(True, alpha=0.3)
+            self.canvas.fig.tight_layout()
+            self.canvas.draw()
+
+        # ── 변수별 산점도 (변수 vs SDM 측정값 y) ──
+        self._draw_scatter(res, df_valid, title_suffix)
+
+    def _draw_scatter(self, res: dict, df_valid: pd.DataFrame, title_suffix: str):
+        """각 독립변수 vs SDM 측정값(y) 산점도 + 단독 회귀선."""
+        feature_cols = res.get('feature_cols', [])
+        self.canvas_scatter.fig.clear()
+        if not feature_cols or 'y' not in df_valid.columns or df_valid.empty:
+            self.canvas_scatter.draw()
             return
-        self.canvas.fig.clear()
-        ax = self.canvas.fig.add_subplot(111)
+
+        y = pd.to_numeric(df_valid['y'], errors='coerce')
+
+        # 등급 마스크
         if PROCESS_COL_GRADE in df_valid.columns:
             grades = df_valid[PROCESS_COL_GRADE].astype(str).str.strip().str.upper()
-            good_c = corrected[grades == 'A'].dropna()
-            bad_c  = corrected[grades == 'E'].dropna()
-            other  = corrected[~grades.isin(['A', 'E'])].dropna()
-            if not other.empty:
-                ax.hist(other, bins=40, color='#888', alpha=0.5, edgecolor='white', label='미분류')
-            if not good_c.empty:
-                ax.hist(good_c, bins=40, color='steelblue', alpha=0.6,
-                        edgecolor='white', label='양품(A)')
-            if not bad_c.empty:
-                ax.hist(bad_c, bins=10, color='red', alpha=0.85,
-                        edgecolor='white', label='불량(E)')
-            ax.legend(fontsize=8)
         else:
-            ax.hist(corrected.dropna(), bins=40, edgecolor='white', alpha=0.7)
-        ax.set_xlabel('보정값 (µA)')
-        ax.set_ylabel('빈도')
-        ax.set_title(f'옵션 {res["option"]} 보정값 분포 [{title_suffix}]  (파랑=양품A  빨강=불량E)')
-        ax.grid(True, alpha=0.3)
-        self.canvas.fig.tight_layout()
-        self.canvas.draw()
+            grades = pd.Series('', index=df_valid.index)
+
+        n_feat = len(feature_cols)
+        ncol   = 3
+        nrow   = (n_feat + ncol - 1) // ncol
+        axes   = self.canvas_scatter.fig.subplots(nrow, ncol, squeeze=False)
+
+        for k, feat in enumerate(feature_cols):
+            ax = axes[k // ncol][k % ncol]
+            if feat not in df_valid.columns:
+                ax.set_visible(False)
+                continue
+            x = pd.to_numeric(df_valid[feat], errors='coerce')
+            m = x.notna() & y.notna()
+            if m.sum() == 0:
+                ax.set_visible(False)
+                continue
+            xm, ym, gm = x[m], y[m], grades[m]
+
+            for lbl, col, a, s in [('', '#888', 0.4, 8),
+                                    ('A', 'steelblue', 0.5, 8),
+                                    ('E', 'red', 0.9, 16)]:
+                sel = (gm == lbl) if lbl else ~gm.isin(['A', 'E'])
+                if sel.any():
+                    ax.scatter(xm[sel], ym[sel], c=col, alpha=a, s=s,
+                               zorder=3 if lbl == 'E' else 1)
+
+            # 단독 회귀선 + 상관계수
+            if xm.nunique() > 1:
+                b, a0 = np.polyfit(xm, ym, 1)
+                xs = np.array([xm.min(), xm.max()])
+                ax.plot(xs, a0 + b * xs, color='red', lw=1.2, alpha=0.8)
+                r = np.corrcoef(xm, ym)[0, 1]
+                ax.set_title(f'{feat}  (r={r:.2f})', fontsize=8)
+            else:
+                ax.set_title(feat, fontsize=8)
+            ax.tick_params(labelsize=7)
+            ax.grid(True, alpha=0.3)
+
+        # 남는 subplot 숨김
+        for k in range(n_feat, nrow * ncol):
+            axes[k // ncol][k % ncol].set_visible(False)
+
+        self.canvas_scatter.fig.suptitle(
+            f'변수별 산점도 [{title_suffix}]  (y=SDM 측정값 µA)', fontsize=9)
+        self.canvas_scatter.fig.tight_layout()
+        self.canvas_scatter.draw()
 
 
 # ══════════════════════════════════════════════
