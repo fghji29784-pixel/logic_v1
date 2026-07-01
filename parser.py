@@ -14,7 +14,7 @@ from constants import (
     DEVICE_OFFSET, DEVICE_CELL_RANGE,
     TOTAL_CELLS, TRAY_ROWS, TRAY_COLS, NUM_LAYERS,
     PROCESS_COL_TRAY_ID, PROCESS_COL_CELL_NO,
-    PROCESS_COL_OCV, PROCESS_COL_DOCV,
+    PROCESS_COL_OCV, PROCESS_COL_DOCV, PROCESS_COL_DOCV_FALLBACK,
     PROCESS_COL_GRADE, PROCESS_COL_CELL_ID, PROCESS_COL_LOT_ID,
 )
 
@@ -425,6 +425,18 @@ def merge_process_data(df_meta: pd.DataFrame,
     if tray_col is None or cell_col is None:
         print('[경고] 공정 데이터에서 TRAY ID 또는 CELL NO 컬럼을 찾을 수 없습니다.')
         return df_meta
+
+    process_df = process_df.copy()
+
+    # dOCV 직접 컬럼이 없으면 (OCV1 - OCV3) 로 대체 계산 → PROCESS_COL_DOCV 로 사용
+    if PROCESS_COL_DOCV not in process_df.columns:
+        c1, c3 = PROCESS_COL_DOCV_FALLBACK
+        if c1 in process_df.columns and c3 in process_df.columns:
+            process_df[PROCESS_COL_DOCV] = (
+                pd.to_numeric(process_df[c1], errors='coerce')
+                - pd.to_numeric(process_df[c3], errors='coerce')
+            )
+            print(f'[정보] dOCV 컬럼이 없어 ({c1} - {c3}) 로 대체 계산했습니다.')
 
     # 필요한 컬럼만 추출
     want_cols = [tray_col, cell_col]

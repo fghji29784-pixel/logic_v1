@@ -34,6 +34,10 @@ PROCESS_COL_OCV = {
 # 검증용 dOCV (3일 기준)
 PROCESS_COL_DOCV  = 'Delta OCV_Delta OCV #07'
 
+# dOCV 직접 컬럼이 없을 때 대체 계산용 (OCV1 - OCV3)
+#   dOCV #07 이 없으면 아래 두 컬럼 차이로 dOCV 를 계산해 PROCESS_COL_DOCV 로 사용
+PROCESS_COL_DOCV_FALLBACK = ('OCV_PRIVT OCV #01', 'OCV_PRIVT OCV #03')
+
 # 판정 레이블 / 메타
 PROCESS_COL_GRADE   = '판정등급'
 PROCESS_COL_CELL_ID = 'Cell ID'
