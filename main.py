@@ -942,16 +942,12 @@ class Tab4Analysis(QWidget):
         self.canvas = PlotCanvas(figsize=(8, 3))
         rl2.addWidget(self.canvas)
 
-        # 변수별 산점도
-        _d4 = QLabel('변수별 산점도: 각 독립변수 vs SDM 측정값(y, 보정 전). '
-                     '빨간 회귀선 기울기 = 그 변수의 단독 영향. '
-                     '점이 선을 따라 모일수록 그 변수가 SDM과 강한 상관 → 보정 효과 큼.\n'
-                     '(파랑=양품A, 빨강=불량E, 회색=미분류)')
-        _d4.setWordWrap(True)
-        _d4.setStyleSheet('color:#777; font-size:10px;')
-        rl2.addWidget(_d4)
-        self.canvas_scatter = PlotCanvas(figsize=(8, 4))
-        rl2.addWidget(self.canvas_scatter)
+        # 변수별 산점도 → 별도 탭('④-2 변수별 산점도')에 크게 표시
+        _d4hint = QLabel('▶ 변수별 산점도는 "④-2 변수별 산점도" 탭에서 크게 확인하세요.')
+        _d4hint.setWordWrap(True)
+        _d4hint.setStyleSheet('color:#0066aa; font-size:10px;')
+        rl2.addWidget(_d4hint)
+        self._build_scatter_tab()
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -962,6 +958,29 @@ class Tab4Analysis(QWidget):
         self.btn_run_one.clicked.connect(self._run_one)
         self.btn_run_all.clicked.connect(self._run_all)
         self.cb_tray.currentIndexChanged.connect(self._update_tray_display)
+
+    def _build_scatter_tab(self):
+        """변수별 산점도를 담는 별도 탭 위젯 구성.
+        캔버스는 이 탭에 배치하되, Tab4의 _draw_scatter 가 그린다."""
+        self.scatter_tab = QWidget()
+        sl = QVBoxLayout(self.scatter_tab)
+
+        _d4 = QLabel('변수별 산점도: 각 독립변수 vs SDM 측정값(y, 보정 전). '
+                     '빨간 회귀선 기울기 = 그 변수의 단독 영향. '
+                     '점이 선을 따라 모일수록 그 변수가 SDM과 강한 상관 → 보정 효과 큼.  '
+                     '(파랑=양품A, 빨강=불량E, 회색=미분류)')
+        _d4.setWordWrap(True)
+        _d4.setStyleSheet('color:#777; font-size:11px;')
+        sl.addWidget(_d4)
+
+        self.canvas_scatter = PlotCanvas(figsize=(11, 8))
+        self.canvas_scatter.setMinimumSize(720, 560)
+        sl.addWidget(NavigationToolbar2QT(self.canvas_scatter, self.scatter_tab))
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(self.canvas_scatter)
+        sl.addWidget(scroll)
 
     def _refresh(self):
         self.tbl_coef.setRowCount(0)
@@ -2015,6 +2034,7 @@ class MainWindow(QMainWindow):
         tabs.addTab(self.tab2, '② 원시 데이터 탐색')
         tabs.addTab(self.tab3, '③ 히트맵')
         tabs.addTab(self.tab4, '④ 분석 로직')
+        tabs.addTab(self.tab4.scatter_tab, '④-2 변수별 산점도')
         tabs.addTab(self.tab5, '⑤ 결과 및 판정')
         tabs.addTab(self.tab6, '⑥ 통합 결과 테이블')
         tabs.addTab(self.tab7, '⑦ 내보내기')
