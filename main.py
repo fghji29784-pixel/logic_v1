@@ -957,13 +957,33 @@ class Tab4Analysis(QWidget):
         # 시그널
         self.btn_run_one.clicked.connect(self._run_one)
         self.btn_run_all.clicked.connect(self._run_all)
-        self.cb_tray.currentIndexChanged.connect(self._update_tray_display)
+        self.cb_tray.currentIndexChanged.connect(self._on_tray_changed)
+        self.cb_tray_scatter.currentIndexChanged.connect(self._on_tray_changed)
+
+    def _on_tray_changed(self, idx):
+        """④ / ④-2 두 트레이 드롭다운을 동기화한 뒤 화면 갱신."""
+        for cb in (self.cb_tray, self.cb_tray_scatter):
+            if cb.currentIndex() != idx:
+                cb.blockSignals(True)
+                cb.setCurrentIndex(idx)
+                cb.blockSignals(False)
+        self._update_tray_display()
 
     def _build_scatter_tab(self):
         """변수별 산점도를 담는 별도 탭 위젯 구성.
         캔버스는 이 탭에 배치하되, Tab4의 _draw_scatter 가 그린다."""
         self.scatter_tab = QWidget()
         sl = QVBoxLayout(self.scatter_tab)
+
+        # 트레이 선택 (④ 분석 로직 탭의 드롭다운과 동기화)
+        tray_row = QHBoxLayout()
+        tray_row.addWidget(QLabel('트레이 선택:'))
+        self.cb_tray_scatter = QComboBox()
+        self.cb_tray_scatter.addItem('전체 (합산)')
+        self.cb_tray_scatter.setToolTip('④ 분석 로직 탭의 트레이 선택과 동기화됩니다.')
+        tray_row.addWidget(self.cb_tray_scatter)
+        tray_row.addStretch()
+        sl.addLayout(tray_row)
 
         _d4 = QLabel('변수별 산점도: 각 독립변수 vs SDM 측정값(y, 보정 전). '
                      '빨간 회귀선 기울기 = 그 변수의 단독 영향. '
@@ -1042,16 +1062,16 @@ class Tab4Analysis(QWidget):
 
     def _display(self, res: dict):
         self._cur_res = res
-        # 트레이 목록 갱신 (선택 유지)
-        prev = self.cb_tray.currentText()
-        self.cb_tray.blockSignals(True)
-        self.cb_tray.clear()
-        self.cb_tray.addItem('전체 (합산)')
-        for tid in res.get('per_tray_results', {}):
-            self.cb_tray.addItem(str(tid))
-        idx = self.cb_tray.findText(prev)
-        self.cb_tray.setCurrentIndex(idx if idx >= 0 else 0)
-        self.cb_tray.blockSignals(False)
+        # 트레이 목록 갱신 (선택 유지) — ④ / ④-2 두 드롭다운 동일하게
+        prev  = self.cb_tray.currentText()
+        items = ['전체 (합산)'] + [str(tid) for tid in res.get('per_tray_results', {})]
+        for cb in (self.cb_tray, self.cb_tray_scatter):
+            cb.blockSignals(True)
+            cb.clear()
+            cb.addItems(items)
+            idx = cb.findText(prev)
+            cb.setCurrentIndex(idx if idx >= 0 else 0)
+            cb.blockSignals(False)
         self._update_tray_display()
 
     def _update_tray_display(self):
@@ -1461,13 +1481,8 @@ class Tab5Result(QWidget):
             except Exception:
                 sur = None
         self._update_surrogate_labels(sur)
-        if sur and 'sdm_cutoff' in sur and corrected is not None:
-            # 중심(트레이 median) + 역산 컷오프 → 절대 SDM 값 (전체는 근사)
-            base_med = float(pd.to_numeric(corrected, errors='coerce').median())
-            y_cut = base_med + sur['sdm_cutoff']
-            axes[0, 1].axhline(y_cut, color='green', linestyle=':',
-                               alpha=0.8, label=f'SDM컷 {y_cut:.2f}')
-            axes[0, 1].legend(fontsize=7)
+        # (SDM 컷오프 선은 실측 상관이 약해 오해 소지 → 산점도에 표시하지 않음.
+        #  역산 컷오프 수치는 'dOCV 대체재 검증' 패널에만 참고용으로 유지.)
 
         # ── (1,0) 분리도 N분 커브 (선택 트레이 기준) ──
         ax = axes[1, 0]
