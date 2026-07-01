@@ -593,7 +593,7 @@ class Tab3Heatmap(QWidget):
         ctrl.addWidget(QLabel('히트맵 종류:'))
         self.cb_type = QComboBox()
         self.cb_type.addItems([
-            f'SDM 전류 (i_{15}min)', '온도 (T_final)',
+            'SDM 전류 (보정전/후+dOCV)', '온도 (start/final/ΔT)',
             'Rwiring', 'dOCV (#07)', '판정등급',
         ])
         ctrl.addWidget(self.cb_type)
@@ -616,7 +616,7 @@ class Tab3Heatmap(QWidget):
         ctrl.addStretch()
         layout.addLayout(ctrl)
 
-        self.canvas = PlotCanvas(figsize=(8, 7))
+        self.canvas = PlotCanvas(figsize=(13, 5.5))
         layout.addWidget(self.canvas)
 
         self.btn_draw.clicked.connect(self._draw)
@@ -628,9 +628,6 @@ class Tab3Heatmap(QWidget):
             return
         trays = self.state.df_meta['tray_id'].unique().tolist()
         self.cb_tray.addItems(trays)
-        # cb_type의 SDM 전류 항목 이름 업데이트
-        n = self.state.n_minutes
-        self.cb_type.setItemText(0, f'SDM 전류 (i_{n}min)')
 
     def _get_grid(self, tray: str, col: str) -> np.ndarray:
         """셀 번호 → 12×12 그리드 변환 (y=1~12, x=A~L)"""
@@ -656,34 +653,113 @@ class Tab3Heatmap(QWidget):
         self._draw_core(self.canvas.fig, tray, kind)
         self.canvas.draw()
 
-    def _draw_core(self, fig, tray: str, kind: int):
-        n   = self.state.n_minutes
-        col_map = {
-            0: (f'i_{n}min', f'SDM 전류 (µA)',  lambda v: v * 1e6),
-            1: ('t_final',   '온도 (°C)',         lambda v: v),
-            2: ('rwiring',   'Rwiring (Ω)',        lambda v: v),
-            3: (PROCESS_COL_DOCV, 'dOCV #07',     lambda v: v),
-            4: (PROCESS_COL_GRADE, '판정등급',     None),
-        }
-        col, title, transform = col_map[kind]
+    def _clip_note(self) -> str:
+        return (f'  (상위 {self.spin_clip.value()}% 클리핑)'
+                if self.chk_clip.isChecked() else '')
 
-        fig.clear()
-        ax = fig.add_subplot(111)
-
+    def _set_ticks(self, ax):
         row_labels = [chr(ord('A') + i) for i in range(TRAY_COLS)]
-        col_labels  = list(range(1, TRAY_ROWS + 1))
+        ax.set_xticks(range(TRAY_COLS))
+        ax.set_yticks(range(TRAY_ROWS))
+        ax.set_xticklabels(row_labels, fontsize=6)
+        ax.set_yticklabels(range(1, TRAY_ROWS + 1), fontsize=6)
+        ax.set_xlabel('행 (A–L)', fontsize=7)
+        ax.set_ylabel('열 (1–12)', fontsize=7)
 
-        if kind == 4:
+    def _render_heat(self, fig, ax, grid, title, fmt):
+        """연속값 히트맵 한 패널 렌더 (클리핑·셀값 주석·colorbar 포함)."""
+        vmax_val = None
+        if self.chk_clip.isChecked():
+            flat = grid[~np.isnan(grid)]
+            if len(flat) > 0:
+                vmax_val = np.percentile(flat, self.spin_clip.value())
+        im = ax.imshow(grid, cmap='RdYlGn_r', aspect='equal', vmax=vmax_val)
+        fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+        ax.set_title(title, fontsize=9)
+        norm_obj = im.norm
+        cmap_obj = im.cmap
+        for iy in range(TRAY_ROWS):
+            for ix in range(TRAY_COLS):
+                val = grid[iy, ix]
+                if not np.isnan(val):
+                    rgba = cmap_obj(norm_obj(val))
+                    lum = 0.299 * rgba[0] + 0.587 * rgba[1] + 0.114 * rgba[2]
+                    tc = 'white' if lum < 0.5 else 'black'
+                    ax.text(ix, iy, fmt.format(val),
+                            ha='center', va='center', fontsize=4.5, color=tc)
+        self._set_ticks(ax)
+
+    def _get_corrected_grid(self, tray: str) -> np.ndarray:
+        """선택 옵션의 SDM 보정값을 12×12 그리드로 (트레이별 회귀 결과 우선)."""
+        grid    = np.full((TRAY_ROWS, TRAY_COLS), np.nan)
+        results = self.state.analysis_results
+        if not results:
+            return grid
+        res = results.get(self.state.selected_option) or results[sorted(results)[0]]
+        per_tray = res.get('per_tray_results', {})
+        if tray in per_tray:
+            dfv  = per_tray[tray].get('df_valid')
+            corr = per_tray[tray].get('corrected')
+        else:
+            dfv  = res.get('df_valid')
+            corr = res.get('corrected')
+        if dfv is None or corr is None or dfv.empty:
+            return grid
+        dfv = dfv.copy()
+        dfv['_corr'] = corr
+        if 'tray_id' in dfv.columns:
+            dfv = dfv[dfv['tray_id'].astype(str) == str(tray)]
+        for _, row in dfv.iterrows():
+            try:
+                cn = int(row['cell_no']) - 1
+            except (ValueError, TypeError):
+                continue
+            v = row['_corr']
+            if pd.notna(v):
+                grid[cn % TRAY_COLS, cn // TRAY_COLS] = float(v)
+        return grid
+
+    def _draw_core(self, fig, tray: str, kind: int):
+        n = self.state.n_minutes
+        fig.clear()
+
+        if kind == 0:
+            # SDM 전류: 보정 전 / 보정 후 / dOCV 한 번에
+            axes = fig.subplots(1, 3)
+            self._render_heat(fig, axes[0],
+                              self._get_grid(tray, f'i_{n}min') * 1e6,
+                              'SDM 보정 전 (µA)', '{:.2f}')
+            self._render_heat(fig, axes[1], self._get_corrected_grid(tray),
+                              f'SDM 보정 후 (µA, 옵션{self.state.selected_option})',
+                              '{:.2f}')
+            self._render_heat(fig, axes[2],
+                              self._get_grid(tray, PROCESS_COL_DOCV),
+                              'dOCV #07', '{:.1f}')
+            fig.suptitle(f'{tray} — SDM 전류{self._clip_note()}', fontsize=10)
+
+        elif kind == 1:
+            # 온도: T_start / T_final / ΔT 한 번에
+            axes = fig.subplots(1, 3)
+            self._render_heat(fig, axes[0], self._get_grid(tray, 't_init'),
+                              'T_start (°C)', '{:.1f}')
+            self._render_heat(fig, axes[1], self._get_grid(tray, 't_final'),
+                              'T_final (°C)', '{:.1f}')
+            self._render_heat(
+                fig, axes[2],
+                self._get_grid(tray, 't_init') - self._get_grid(tray, 't_final'),
+                'ΔT = T_start−T_final (°C)', '{:.2f}')
+            fig.suptitle(f'{tray} — 온도{self._clip_note()}', fontsize=10)
+
+        elif kind == 4:
+            ax = fig.add_subplot(111)
             sub = self.state.df_meta[self.state.df_meta['tray_id'] == tray]
             grid = np.full((TRAY_ROWS, TRAY_COLS), np.nan)
             for _, row in sub.iterrows():
                 cn    = int(row['cell_no']) - 1
-                x_idx = cn // TRAY_COLS
-                y_idx = cn %  TRAY_COLS
                 grade = str(row.get(PROCESS_COL_GRADE, '')).upper()
-                grid[y_idx, x_idx] = 1.0 if grade == 'E' else 0.0
+                grid[cn % TRAY_COLS, cn // TRAY_COLS] = 1.0 if grade == 'E' else 0.0
             cmap = mcolors.ListedColormap(['black', 'red'])
-            im = ax.imshow(grid, cmap=cmap, vmin=0, vmax=1, aspect='equal')
+            ax.imshow(grid, cmap=cmap, vmin=0, vmax=1, aspect='equal')
             ax.set_title(f'{tray} — 판정등급 (검=A, 빨=E)')
             for iy in range(TRAY_ROWS):
                 for ix in range(TRAY_COLS):
@@ -692,40 +768,19 @@ class Tab3Heatmap(QWidget):
                         ax.text(ix, iy, 'E' if val == 1.0 else 'A',
                                 ha='center', va='center', fontsize=6,
                                 color='white', fontweight='bold')
-        else:
-            grid = self._get_grid(tray, col)
-            if transform:
-                grid = transform(grid)
-            vmax_val = None
-            if self.chk_clip.isChecked():
-                flat = grid[~np.isnan(grid)]
-                if len(flat) > 0:
-                    vmax_val = np.percentile(flat, self.spin_clip.value())
-            im = ax.imshow(grid, cmap='RdYlGn_r', aspect='equal', vmax=vmax_val)
-            fig.colorbar(im, ax=ax)
-            clip_note = (f'  (상위 {self.spin_clip.value()}% 클리핑)'
-                         if self.chk_clip.isChecked() else '')
-            ax.set_title(f'{tray} — {title}{clip_note}')
-            fmt_map = {0: '{:.2f}', 1: '{:.1f}', 2: '{:.4f}', 3: '{:.1f}'}
-            fmt = fmt_map.get(kind, '{:.2f}')
-            norm_obj = im.norm
-            cmap_obj = im.cmap
-            for iy in range(TRAY_ROWS):
-                for ix in range(TRAY_COLS):
-                    val = grid[iy, ix]
-                    if not np.isnan(val):
-                        rgba = cmap_obj(norm_obj(val))
-                        lum = 0.299 * rgba[0] + 0.587 * rgba[1] + 0.114 * rgba[2]
-                        tc = 'white' if lum < 0.5 else 'black'
-                        ax.text(ix, iy, fmt.format(val),
-                                ha='center', va='center', fontsize=5.5, color=tc)
+            self._set_ticks(ax)
 
-        ax.set_xticks(range(TRAY_COLS))
-        ax.set_yticks(range(TRAY_ROWS))
-        ax.set_xticklabels(row_labels, fontsize=8)
-        ax.set_yticklabels(col_labels, fontsize=8)
-        ax.set_xlabel('행 (A–L)', fontsize=9)
-        ax.set_ylabel('열 (1–12)', fontsize=9)
+        else:
+            # 단일 패널: Rwiring / dOCV
+            single_map = {
+                2: ('rwiring',        'Rwiring (Ω)', '{:.4f}'),
+                3: (PROCESS_COL_DOCV, 'dOCV #07',    '{:.1f}'),
+            }
+            col, title, fmt = single_map[kind]
+            ax = fig.add_subplot(111)
+            self._render_heat(fig, ax, self._get_grid(tray, col),
+                              f'{tray} — {title}{self._clip_note()}', fmt)
+
         fig.tight_layout()
 
     def _save_all(self):
@@ -741,7 +796,7 @@ class Tab3Heatmap(QWidget):
         count = 0
         for tray in trays:
             for kind, name in enumerate(kind_names):
-                fig = plt.figure(figsize=(8, 7))
+                fig = plt.figure(figsize=(14, 5) if kind in (0, 1) else (8, 7))
                 self._draw_core(fig, tray, kind)
                 fig.savefig(f'{folder}/{tray}_{name}.png', dpi=150, bbox_inches='tight')
                 plt.close(fig)
@@ -1062,6 +1117,7 @@ class Tab4Analysis(QWidget):
 
     def _display(self, res: dict):
         self._cur_res = res
+        self.state.selected_option = res.get('option', self.state.selected_option)
         # 트레이 목록 갱신 (선택 유지) — ④ / ④-2 두 드롭다운 동일하게
         prev  = self.cb_tray.currentText()
         items = ['전체 (합산)'] + [str(tid) for tid in res.get('per_tray_results', {})]
