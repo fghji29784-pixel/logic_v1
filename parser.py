@@ -328,7 +328,8 @@ def parse_tray_folder(folder_path: str, n_minutes: int = 15) -> tuple[pd.DataFra
             cur_arr = meas[i_col].values.astype(float)
             vol_arr = meas[v_col].values.astype(float)
 
-            v_init = vol_arr[0] * 1000.0 if len(vol_arr) > 0 else np.nan   # V→mV
+            v_init  = vol_arr[0]  * 1000.0 if len(vol_arr) > 0 else np.nan   # V→mV
+            v_final = vol_arr[-1] * 1000.0 if len(vol_arr) > 0 else np.nan   # V→mV
 
             # 온도
             t_key  = f'T_{cell_no}'
@@ -345,6 +346,9 @@ def parse_tray_folder(folder_path: str, n_minutes: int = 15) -> tuple[pd.DataFra
                 'channel_no': ch,
                 'rwiring'  : kss['channels'][ch]['rwiring'],
                 'v_init'   : v_init,
+                'v_final'  : v_final,
+                'delta_v'  : (v_init - v_final)   # ΔV = V_init − V_final (OCV drop)
+                             if not (np.isnan(v_init) or np.isnan(v_final)) else np.nan,
                 't_init'   : t_init,
                 't_final'  : t_final,
                 'delta_t'  : (t_final - t_init)
