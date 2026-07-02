@@ -73,7 +73,7 @@ class MainWindow(QMainWindow):
 
         self.state = AppState()
 
-        tabs = QTabWidget()
+        self.tabs = tabs = QTabWidget()
         self.setCentralWidget(tabs)
 
         self.tab1 = Tab1Load(self.state)
@@ -98,6 +98,28 @@ class MainWindow(QMainWindow):
         # 분석 완료 → Tab5 자동 갱신, Tab8 세션 정보 갱신
         self.tab4.analysis_done.connect(lambda opt: self.tab5._draw())
         self.tab4.analysis_done.connect(lambda opt: self.tab8._refresh())
+
+        # ── 상태표시줄: 권장 워크플로 + 탭별 안내 ──
+        guide = QLabel('권장 순서:  ① 불러오기  →  ④ 분석 실행  →  ③ 히트맵 / ⑤ 결과 / ⑥ 표')
+        guide.setStyleSheet('color:#555; font-weight:bold;')
+        self.statusBar().addPermanentWidget(guide)
+        self._tab_hints = [
+            'SDM 데이터 폴더와 공정 데이터 파일을 선택해 불러오세요. (가장 먼저 할 일)',
+            '셀별 전류·전압·온도 시계열을 확인하세요. 상위 N% 이상 셀을 자동 강조합니다.',
+            '트레이 위치별 분포. 색약안전 팔레트 선택 가능, 아래 툴바로 확대해 값을 크게 보세요.',
+            "모델 옵션을 고르고 '실행'을 누르면 보정·판정 모델을 학습합니다. (③⑤⑥은 이 실행 후 채워짐)",
+            '각 독립변수와 SDM의 관계 산점도. ④ 분석 로직 탭의 트레이 선택과 연동됩니다.',
+            '보정값 분포와 판정 기준선, dOCV 대체재 검증. ④ 분석 실행 후 표시됩니다.',
+            '셀별 전체 지표 통합 표. ④ 분석 실행 후 표시됩니다.',
+            '결과 표(Excel/CSV)와 그래프(PNG/PDF)를 저장합니다.',
+            '여러 트레이의 불량률·분리도 추이를 비교합니다.',
+        ]
+        tabs.currentChanged.connect(self._on_tab_changed)
+        self._on_tab_changed(0)
+
+    def _on_tab_changed(self, idx: int):
+        if 0 <= idx < len(self._tab_hints):
+            self.statusBar().showMessage('💡  ' + self._tab_hints[idx])
 
 
 

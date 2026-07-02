@@ -97,6 +97,13 @@ class Tab3Heatmap(QWidget):
         self.spin_clip.setToolTip('색상 상한으로 쓸 백분위. 예: 99% → 상위 1% 극단값을 상한색으로 표시.')
         ctrl.addWidget(self.spin_clip)
 
+        ctrl.addWidget(QLabel('색상:'))
+        self.cb_cmap = QComboBox()
+        self.cb_cmap.addItems(['빨강-초록 (RdYlGn)', '색약안전 (cividis)', '색약안전 (viridis)'])
+        self.cb_cmap.setToolTip('빨강-초록은 적록색약에 취약합니다. 색약안전 팔레트를 권장합니다.\n'
+                                '(불량 E셀은 색과 무관하게 빨간 테두리로도 표시됩니다.)')
+        ctrl.addWidget(self.cb_cmap)
+
         self.btn_draw = QPushButton('그리기')
         ctrl.addWidget(self.btn_draw)
         self.btn_save_all = QPushButton('전체 저장 (PNG)')
@@ -106,16 +113,19 @@ class Tab3Heatmap(QWidget):
 
         _clip_help = QLabel(
             '※ 클리핑: 극단값(상위 N% 초과)을 색상 상한으로 제한해 색 대비를 높이는 기능입니다. '
-            '값 자체는 유지되며 색 스케일만 조정됩니다.  |  빨간 테두리 = E등급(불량) 셀')
+            '값 자체는 유지되며 색 스케일만 조정됩니다.  |  빨간 테두리 = E등급(불량) 셀  |  '
+            '아래 툴바(🔍)로 확대해 셀 값을 크게 볼 수 있습니다.')
         _clip_help.setWordWrap(True)
         _clip_help.setStyleSheet('color:#777; font-size:10px;')
         layout.addWidget(_clip_help)
 
         self.canvas = PlotCanvas(figsize=(13, 5.5))
+        layout.addWidget(NavigationToolbar2QT(self.canvas, self))
         layout.addWidget(self.canvas)
 
         self.btn_draw.clicked.connect(self._draw)
         self.btn_save_all.clicked.connect(self._save_all)
+        self.cb_cmap.currentIndexChanged.connect(self._draw)
 
     def _refresh(self):
         self.cb_tray.clear()
@@ -139,6 +149,11 @@ class Tab3Heatmap(QWidget):
             except (ValueError, TypeError):
                 pass
         return grid
+
+    def _cmap(self) -> str:
+        """선택된 컬러맵 (색약안전 옵션 포함). 높은 값 = 눈에 띄는 색."""
+        return {0: 'RdYlGn_r', 1: 'cividis', 2: 'viridis'}.get(
+            self.cb_cmap.currentIndex(), 'RdYlGn_r')
 
     def _draw(self):
         tray = self.cb_tray.currentText()
@@ -169,7 +184,7 @@ class Tab3Heatmap(QWidget):
             flat = grid[~np.isnan(grid)]
             if len(flat) > 0:
                 vmax = np.percentile(flat, self.spin_clip.value())
-        im = ax.imshow(grid, cmap='RdYlGn_r', aspect='equal', vmin=vmin, vmax=vmax)
+        im = ax.imshow(grid, cmap=self._cmap(), aspect='equal', vmin=vmin, vmax=vmax)
         fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
         ax.set_title(title, fontsize=9)
         norm_obj = im.norm

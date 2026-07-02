@@ -65,6 +65,7 @@ class Tab4Analysis(QWidget):
         self.state    = state
         self.workers: dict[int, AnalysisWorker] = {}
         self._cur_res: dict | None = None
+        self._pending = 0
         self._build_ui()
         state.callbacks.append(self._refresh)
 
@@ -184,6 +185,11 @@ class Tab4Analysis(QWidget):
         self.btn_run_all.setFixedHeight(36)
         cl.addWidget(self.btn_run_one)
         cl.addWidget(self.btn_run_all)
+
+        self.lbl_run_status = QLabel('대기 중 — 옵션을 고르고 실행하세요.')
+        self.lbl_run_status.setWordWrap(True)
+        self.lbl_run_status.setStyleSheet('color:#0066aa; font-size:11px;')
+        cl.addWidget(self.lbl_run_status)
 
         cl.addStretch()
         layout.addWidget(ctrl)
@@ -326,6 +332,7 @@ class Tab4Analysis(QWidget):
         self.state.dep_type           = dep_type
         self.state.rwiring_threshold  = rw
         self.state.feature_list       = feature_list
+        self._begin_busy(1)
         self._launch_worker(opt, feature_list)
 
     def _run_all(self):
@@ -336,18 +343,40 @@ class Tab4Analysis(QWidget):
         self.state.dep_type          = dep_type
         self.state.rwiring_threshold = rw
         self.state.feature_list      = feature_list
+        self._begin_busy(5)
         for opt in range(1, 6):
             self._launch_worker(opt, feature_list)
+
+    def _begin_busy(self, count: int):
+        """분석 시작: 실행 버튼 잠금 + 진행 표시."""
+        self._pending += count
+        self.btn_run_one.setEnabled(False)
+        self.btn_run_all.setEnabled(False)
+        self.lbl_run_status.setText(f'⏳ 분석 중… (남은 {self._pending}개)')
+
+    def _end_busy(self):
+        """워커 1개 완료: 카운트 감소, 0이면 버튼 복구."""
+        self._pending = max(0, self._pending - 1)
+        if self._pending == 0:
+            self.btn_run_one.setEnabled(True)
+            self.btn_run_all.setEnabled(True)
+            self.lbl_run_status.setText('✅ 분석 완료')
+        else:
+            self.lbl_run_status.setText(f'⏳ 분석 중… (남은 {self._pending}개)')
 
     def _launch_worker(self, opt: int, feature_list: list | None = None):
         w = AnalysisWorker(self.state, opt, feature_list=feature_list)
         self.workers[opt] = w
         w.finished.connect(lambda res, o=opt: self._on_done(o, res))
-        w.error.connect(lambda e, o=opt:
-                        QMessageBox.critical(self, f'옵션 {o} 오류', e))
+        w.error.connect(lambda e, o=opt: self._on_error(o, e))
         w.start()
 
+    def _on_error(self, opt: int, err: str):
+        self._end_busy()
+        QMessageBox.critical(self, f'옵션 {opt} 오류', err)
+
     def _on_done(self, opt: int, res: dict):
+        self._end_busy()
         self.state.analysis_results[opt] = res
         self.analysis_done.emit(opt)
 
